@@ -8,6 +8,9 @@ import { testConnection, isAiConfigured } from './ai/client'
 import { aiBatchParse, ruleBatchParse } from './ai/batch'
 import { rebalanceUnscheduled, rebalanceProject } from './ai/scheduler'
 import type { RebalanceResult } from '@shared/types'
+import { AGENT_IPC } from '@shared/agent'
+import * as agent from './agent/runner'
+import * as agentStore from './agent/store'
 
 /** 广播任务变化（分析完成/手机端操作后刷新所有视图） */
 export function broadcastTaskChanged(win: BrowserWindow | null): void {
@@ -18,6 +21,21 @@ export function broadcastTaskChanged(win: BrowserWindow | null): void {
 
 export function registerIpcHandlers(getWin: () => BrowserWindow | null): void {
   setBroadcastFn(() => broadcastTaskChanged(getWin()))
+  agentStore.recoverInterruptedRuns()
+  agent.setAgentNotify(() => {
+    broadcastTaskChanged(getWin())
+    const win = getWin()
+    if (win && !win.isDestroyed()) win.webContents.send(AGENT_IPC.changed)
+  })
+  ipcMain.handle(AGENT_IPC.start, (_e, goal: unknown) => agent.startRun(goal))
+  ipcMain.handle(AGENT_IPC.send, (_e, id: unknown, message: unknown) => agent.sendMessage(id, message))
+  ipcMain.handle(AGENT_IPC.latest, () => agentStore.latestRun())
+  ipcMain.handle(AGENT_IPC.get, (_e, id: string) => {
+    if (typeof id !== 'string' || id.length > 100) throw new Error('对话编号无效。')
+    return agentStore.getRun(id)
+  })
+  ipcMain.handle(AGENT_IPC.confirm, (_e, id: unknown, accepted: unknown) => agent.confirmChange(id, accepted))
+  ipcMain.handle(AGENT_IPC.cancel, (_e, id: unknown) => agent.cancelRun(id))
 
   ipcMain.handle(IPC.taskCreate, (_e, input: TaskCreateInput): Task => {
     const task = taskDao.createTask(input)

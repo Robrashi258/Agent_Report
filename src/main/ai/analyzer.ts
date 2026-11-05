@@ -207,7 +207,11 @@ export async function dailyReview(): Promise<void> {
       }), { jsonMode: true, temperature: 0.2 })
       const parsed = parseReviewJson(raw)
       if (parsed) {
-        taskDao.updateTask({ id: task.id, importance: parsed.importance, urgency: parsed.urgency })
+        // 调用期间用户可能手动调整过任务，再读一次，避免覆盖用户刚做的修改。
+        const current = taskDao.getTaskById(task.id)
+        if (current && !current.manualLocked && current.updatedAt === task.updatedAt) {
+          taskDao.updateTask({ id: task.id, importance: parsed.importance, urgency: parsed.urgency }, 'review')
+        }
       }
     } catch (e) {
       console.warn(`[analyzer] 重评 task ${task.id} 失败`, e)

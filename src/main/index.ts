@@ -1,5 +1,6 @@
 import { app, BrowserWindow, shell } from 'electron'
 import path from 'node:path'
+import { mkdirSync } from 'node:fs'
 import { registerIpcHandlers } from './ipc'
 import { closeDb } from './db/database'
 import { onAppStart } from './ai/analyzer'
@@ -7,6 +8,10 @@ import { rebalanceUnscheduled } from './ai/scheduler'
 
 // win32 通知必设
 app.setAppUserModelId('com.personal.plan')
+// 新版与0.1用户数据分开，测试可指定临时目录，不迁移/覆盖原库。
+const agentDataPath = process.env.SUISHOU_DATA_DIR || path.join(app.getPath('appData'), 'suishou-plan-agent')
+mkdirSync(agentDataPath, { recursive: true })
+app.setPath('userData', agentDataPath)
 
 let mainWindow: BrowserWindow | null = null
 
@@ -18,7 +23,7 @@ function createWindow(): void {
     minHeight: 600,
     show: false,
     autoHideMenuBar: true,
-    title: '随手计划',
+    title: '随手计划 · Agent',
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
       sandbox: false,

@@ -1,0 +1,200 @@
+import { app } from 'electron'
+import assert from 'node:assert/strict'
+import { mkdtempSync, readFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { getDb, closeDb } from '../src/main/db/database'
+import { runMigrations } from '../src/main/db/migrations'
+import { getSettings, setSettings } from '../src/main/db/settingsDao'
+import * as tasks from '../src/main/db/taskDao'
+import * as store from '../src/main/agent/store'
+import { drive, confirmChange, sendMessage, cancelRun } from '../src/main/agent/runner'
+import { executeTool } from '../src/main/agent/tools'
+import { computeScore, isOverdue } from '../src/shared/priority'
+import { extractDueDate } from '../src/main/ai/rules'
+import type { ModelMessage, ModelTransport } from '../src/main/agent/model'
+
+app.setPath('userData', mkdtempSync(join(tmpdir(), 'suishou-agent-tests-')))
+let passed = 0
+async function test(name: string, fn: () => unknown | Promise<unknown>): Promise<void> {
+  await fn(); passed++; console.log(`PASS ${name}`)
+}
+function seed(content: string): number {
+  const task = tasks.createTask({ content })
+  tasks.applyAnalysis(task.id, { summary: content, importance: 3, urgency: 3, category: '学习', tags: [], estimateMin: 30, dueAt: null }, 'none')
+  return task.id
+}
+let callCounter = 0
+function call(name: string, args: object): ModelMessage {
+  return { role: 'assistant', content: null, tool_calls: [{ id: `test-${++callCounter}`, type: 'function', function: { name, arguments: JSON.stringify(args) } }] }
+}
+function create(goal = '测试任务'): string { return store.createRun(goal, [{ role: 'system', content: '' }, { role: 'user', content: goal }]) }
+const configured = { aiBaseUrl: 'https://test.invalid/v1', aiApiKey: 'test-only-not-a-key', aiModel: 'mock' }
+
+app.whenReady().then(async () => {
+  try {
+    setSettings(configured)
+    const taskId = seed('测试报告'), otherId = seed('另一份报告')
+    await test('迁移至v6且重复执行不破坏数据', () => { runMigrations(getDb()); assert.equal(getDb().pragma('user_version', { simple: true }), 6); assert.ok(tasks.getTaskById(taskId)) })
+    await test('带截止的过期判定不抛异常', () => { assert.equal(isOverdue({ dueAt: '2026-01-01T12:00:00' }, new Date('2026-01-02').getTime()), true); assert.equal(isOverdue({ dueAt: null }), false); assert.ok(Number.isFinite(computeScore(tasks.getTaskById(taskId)!))) })
+    await test('明天下午与分钟日期解析', () => { const now = new Date(2026, 10, 5, 10); assert.equal(extractDueDate('明天下午3:30交报告', now), '2026-11-06T15:30:00'); assert.equal(extractDueDate('明天27:00', now), null) })
+    await test('自动重评不锁定、人工修改锁定', () => { tasks.updateTask({ id: taskId, importance: 4 }, 'review'); assert.equal(tasks.getTaskById(taskId)!.manualLocked, false); tasks.updateTask({ id: otherId, importance: 4 }); assert.equal(tasks.getTaskById(otherId)!.manualLocked, true) })
+    await test('工具拒绝未知名称、越界参数和多余字段', () => {
+      const ctx = { observed: new Map<number, string>() }
+      assert.equal(executeTool('raw_sql', '{}', ctx).errorCode, 'UNKNOWN_TOOL')
+      assert.equal(executeTool('list_tasks', '{"limit":100}', ctx).errorCode, 'INVALID_ARGUMENTS')
+      assert.equal(executeTool('get_task', '{"taskId":1,"confirmed":true}', ctx).errorCode, 'INVALID_ARGUMENTS')
+      assert.equal(executeTool('get_task', '{broken', ctx).errorCode, 'INVALID_ARGUMENTS')
+      assert.equal(executeTool('get_task', '{"taskId":"1"}', ctx).errorCode, 'INVALID_ARGUMENTS')
+    })
+    await test('查询将特殊字符当内容，不返回设置密钥', () => {
+      const result = executeTool('list_tasks', JSON.stringify({ query: "' OR 1=1--" }), { observed: new Map() })
+      assert.deepEqual((result.data as { tasks: unknown[] }).tasks, [])
+      assert.equal(JSON.stringify(executeTool('list_tasks', '{}', { observed: new Map() })).includes(configured.aiApiKey), false)
+    })
+    await test('没有本轮读取证据不能提出写入草案', () => {
+      const current = tasks.getTaskById(taskId)!
+      assert.equal(executeTool('propose_priority_change', JSON.stringify({ taskId, importance: 5, expectedUpdatedAt: current.updatedAt, reason: '测试' }), { observed: new Map() }).errorCode, 'READ_REQUIRED')
+    })
+    let proposalRun = ''
+    await test('真实DAO读取结果回传后产生草案，确认前不写入', async () => {
+      const before = tasks.getTaskById(taskId)!
+      let round = 0
+      const model: ModelTransport = async (_s, messages) => {
+        if (round++ === 0) return call('get_task', { taskId })
+        const observation = JSON.parse(messages.at(-1)!.content!)
+        assert.equal(observation.data.id, taskId)
+        return call('propose_priority_change', { taskId, importance: 5, expectedUpdatedAt: observation.data.updatedAt, reason: '用户要求' })
+      }
+      proposalRun = create('把报告重要度改为5')
+      await drive(proposalRun, model)
+      assert.equal(store.getRun(proposalRun).status, 'awaiting_confirmation')
+      assert.equal(tasks.getTaskById(taskId)!.importance, before.importance)
+      assert.equal(store.getRun(proposalRun).events.filter(e => e.kind === 'tool').length, 2)
+    })
+    await test('确认短事务保存，重复确认不重复写入', () => {
+      confirmChange(proposalRun, true); confirmChange(proposalRun, true)
+      assert.equal(tasks.getTaskById(taskId)!.importance, 5)
+      assert.equal(tasks.getTaskById(taskId)!.manualLocked, true)
+      assert.equal((getDb().prepare('SELECT COUNT(*) AS count FROM agent_actions WHERE run_id=?').get(proposalRun) as { count: number }).count, 1)
+    })
+    await test('放弃草案不改变任务', async () => {
+      const run = create(), current = tasks.getTaskById(taskId)!
+      const ctx = { observed: new Map<number, string>() }; executeTool('get_task', JSON.stringify({ taskId }), ctx)
+      const result = executeTool('propose_priority_change', JSON.stringify({ taskId, importance: 2, expectedUpdatedAt: current.updatedAt, reason: '新请求' }), ctx)
+      store.save(run, [], 'awaiting_confirmation', result.pending!)
+      confirmChange(run, false)
+      assert.equal(tasks.getTaskById(taskId)!.importance, 5)
+    })
+    await test('同一对话可确认不同草案，幂等键不误复用', () => {
+      for (const importance of [2, 5]) {
+        const ctx = { observed: new Map<number, string>() }, current = tasks.getTaskById(taskId)!
+        executeTool('get_task', JSON.stringify({ taskId }), ctx)
+        const result = executeTool('propose_priority_change', JSON.stringify({ taskId, importance, expectedUpdatedAt: current.updatedAt, reason: '后续请求' }), ctx)
+        const messages = JSON.parse(store.row(proposalRun).messages_json)
+        store.save(proposalRun, messages, 'awaiting_confirmation', result.pending!)
+        confirmChange(proposalRun, true)
+        assert.equal(tasks.getTaskById(taskId)!.importance, importance)
+      }
+      assert.equal((getDb().prepare('SELECT COUNT(*) AS count FROM agent_actions WHERE run_id=?').get(proposalRun) as { count: number }).count, 3)
+    })
+    await test('确认事务中审计写入失败会回滚任务修改', () => {
+      const run = create(), ctx = { observed: new Map<number, string>() }, current = tasks.getTaskById(taskId)!
+      executeTool('get_task', JSON.stringify({ taskId }), ctx)
+      const result = executeTool('propose_priority_change', JSON.stringify({ taskId, urgency: 5, expectedUpdatedAt: current.updatedAt, reason: '回滚测试' }), ctx)
+      store.save(run, [], 'awaiting_confirmation', result.pending!)
+      getDb().exec("CREATE TRIGGER test_action_abort BEFORE INSERT ON agent_actions BEGIN SELECT RAISE(ABORT,'test rollback'); END")
+      try { assert.equal(confirmChange(run, true).status, 'failed'); assert.equal(tasks.getTaskById(taskId)!.urgency, current.urgency) }
+      finally { getDb().exec('DROP TRIGGER test_action_abort') }
+    })
+    await test('并发修改导致草案失效且不覆盖', async () => {
+      const run = create(), ctx = { observed: new Map<number, string>() }, current = tasks.getTaskById(taskId)!
+      executeTool('get_task', JSON.stringify({ taskId }), ctx)
+      const result = executeTool('propose_priority_change', JSON.stringify({ taskId, urgency: 5, expectedUpdatedAt: current.updatedAt, reason: '测试' }), ctx)
+      store.save(run, [], 'awaiting_confirmation', result.pending!)
+      tasks.updateTask({ id: taskId, importance: 1 })
+      assert.equal(confirmChange(run, true).status, 'failed')
+      assert.equal(tasks.getTaskById(taskId)!.importance, 1)
+      assert.equal(tasks.getTaskById(taskId)!.urgency, 3)
+    })
+    await test('工具失败观察可以驱动后续纠正调用', async () => {
+      const run = create(); let step = 0
+      await drive(run, async (_s, messages) => {
+        if (step++ === 0) return call('unknown', {})
+        if (step === 2) { assert.equal(JSON.parse(messages.at(-1)!.content!).errorCode, 'UNKNOWN_TOOL'); return call('list_tasks', { limit: 2 }) }
+        return call('finish_reply', { text: '已查到任务。' })
+      })
+      assert.equal(store.getRun(run).status, 'completed')
+    })
+    await test('暂停问题与恢复上下文可读取', async () => {
+      const run = create('提高优先级')
+      await drive(run, async () => call('ask_user', { question: '你想调重要度还是紧急度？' }))
+      assert.equal(store.getRun(run).status, 'waiting_user')
+      let receivedAnswer = false
+      sendMessage(run, '重要度', async (_s, messages) => { receivedAnswer = messages.at(-1)!.content === '重要度'; return call('finish_reply', { text: '收到。' }) })
+      for (let i = 0; i < 100 && store.getRun(run).status === 'running'; i++) await new Promise(r => setTimeout(r, 2))
+      assert.equal(receivedAnswer, true); assert.equal(store.getRun(run).status, 'completed')
+    })
+    await test('连续工具调用达到预算后停止', async () => {
+      const run = create(); await drive(run, async () => call('list_tasks', { limit: 1 }))
+      assert.equal(store.getRun(run).status, 'failed'); assert.ok(store.getRun(run).events.some(e => e.text.includes('6次')))
+    })
+    await test('普通文本结束会要求模型纠正为结构化等待动作', async () => {
+      const run = create(); let round = 0
+      await drive(run, async (_s, messages) => {
+        if (round++ === 0) return { role: 'assistant', content: '你指哪一个任务？' }
+        assert.equal(messages.at(-1)!.role, 'system')
+        return call('ask_user', { question: '你指哪一个任务？' })
+      })
+      assert.equal(store.getRun(run).status, 'waiting_user')
+    })
+    await test('取消运行后迟到模型响应不执行工具', async () => {
+      const run = create(); let resolve!: (m: ModelMessage) => void
+      const future = drive(run, async () => new Promise<ModelMessage>(r => { resolve = r }))
+      cancelRun(run); resolve(call('list_tasks', {})); await future
+      assert.equal(store.getRun(run).status, 'cancelled'); assert.equal(store.getRun(run).events.some(e => e.kind === 'tool'), false)
+    })
+    await test('中断恢复移除未配齐的工具请求并保留用户目标', () => {
+      const run = create('恢复测试'); store.save(run, [{ role: 'system', content: '' }, { role: 'user', content: '恢复测试' }, call('get_task', { taskId })], 'running')
+      store.recoverInterruptedRuns(); assert.equal(store.getRun(run).status, 'failed'); assert.equal(JSON.parse(store.row(run).messages_json).length, 2)
+    })
+    if (process.argv.includes('--live')) {
+      const keyFile = process.env.AGENT_TEST_KEY_FILE
+      if (!keyFile) throw new Error('真实验证需要AGENT_TEST_KEY_FILE。')
+      const key = readFileSync(keyFile, 'utf8').match(/sk-[A-Za-z0-9_.-]+/)?.[0]
+      if (!key) throw new Error('未读到凭据。')
+      setSettings({ aiBaseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', aiApiKey: key, aiModel: 'qwen-plus' })
+      await test('真实千问原生工具查询并回传结果', async () => {
+        const run = create('请查询当前未完成任务，只列出任务名，不修改数据。')
+        await drive(run)
+        const result = store.getRun(run)
+        assert.equal(result.status, 'completed', result.events.filter(e => e.kind === 'status').map(e => e.text).join())
+        assert.ok(result.events.some(e => e.kind === 'tool' && e.text.includes('list_tasks')))
+        assert.ok(result.events.some(e => e.kind === 'assistant' && e.text.includes('报告')))
+      })
+      await test('真实千问生成评分草案，用户确认后才写入', async () => {
+        const previous = tasks.getTaskById(taskId)!.urgency
+        const run = create('把“测试报告”的紧急度改成5。')
+        await drive(run)
+        assert.equal(store.getRun(run).status, 'awaiting_confirmation')
+        assert.equal(tasks.getTaskById(taskId)!.urgency, previous)
+        assert.equal(store.getRun(run).pending!.taskId, taskId)
+        confirmChange(run, true)
+        assert.equal(tasks.getTaskById(taskId)!.urgency, 5)
+      })
+      await test('真实千问对报告指代不明提出澄清', async () => {
+        const run = create('把报告的优先级提高一些。')
+        await drive(run)
+        assert.equal(store.getRun(run).status, 'waiting_user', JSON.stringify(store.getRun(run).events))
+        assert.ok(store.getRun(run).events.some(e => e.kind === 'tool' && e.text.includes('ask_user')))
+      })
+      // 测试库退出后清空密钥，日志从不打印凭据。
+      setSettings({ aiApiKey: '' })
+    }
+    console.log(`RESULT ${passed} passed; isolated database only; mode=${process.argv.includes('--live') ? 'mock+live' : 'mock'}`)
+    closeDb(); app.exit(0)
+  } catch (error) {
+    if (process.argv.includes('--live')) { try { setSettings({ aiApiKey: '' }) } catch { /* 不掩盖原错误 */ } }
+    console.error(error instanceof Error ? error.message : String(error)); closeDb(); app.exit(1)
+  }
+})

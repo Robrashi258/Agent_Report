@@ -199,6 +199,7 @@ export function listProjects(): ProjectGroup[] {
     .all() as TaskRow[]
   const byProject = new Map<string, Task[]>()
   for (const r of rows) {
+    if (!r.project_id) continue
     const list = byProject.get(r.project_id) ?? []
     list.push(rowToTask(r))
     byProject.set(r.project_id, list)
@@ -238,7 +239,8 @@ export function addChainStep(projectId: string, content: string, dueAt: string |
   ).run(content.trim(), dueAt, projectId, order, info.total + 1, ts, ts)
   // 组内所有任务的 chain_total +1
   db.prepare(`UPDATE tasks SET chain_total = ? WHERE project_id = ?`).run(info.total + 1, projectId)
-  return getTaskById(db.prepare(`SELECT MAX(id) AS id FROM tasks WHERE project_id = ?`).get(projectId)!.id)
+  const inserted = db.prepare(`SELECT MAX(id) AS id FROM tasks WHERE project_id = ?`).get(projectId) as { id: number }
+  return getTaskById(inserted.id)
 }
 
 /** 环节上移/下移一位（交换 chain_order） */
@@ -262,7 +264,7 @@ export function moveChainStep(id: number, dir: 'up' | 'down'): Task[] | null {
 }
 
 /** 更新任务部分字段 */
-export function updateTask(input: TaskUpdateInput): Task | null {
+export function updateTask(input: TaskUpdateInput, source: 'user' | 'review' = 'user'): Task | null {
   const db = getDb()
   const existing = getTaskById(input.id)
   if (!existing) return null
@@ -286,12 +288,12 @@ export function updateTask(input: TaskUpdateInput): Task | null {
     sets.push('importance = ?')
     params.push(clamp(input.importance, 1, 5))
     // 用户手动调重要性 → 锁定，AI 每日重评不再覆盖
-    sets.push('manual_locked = 1')
+    if (source === 'user') sets.push('manual_locked = 1')
   }
   if (input.urgency !== undefined) {
     sets.push('urgency = ?')
     params.push(clamp(input.urgency, 1, 5))
-    sets.push('manual_locked = 1')
+    if (source === 'user') sets.push('manual_locked = 1')
   }
   if (input.estimateMin !== undefined) {
     sets.push('estimate_min = ?')

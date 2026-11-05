@@ -82,7 +82,7 @@ function provideToast(): void {
           <span>{{ n.label }}</span>
         </button>
       </nav>
-      <div class="sidebar-footer">v0.1 · 本地数据</div>
+      <div class="sidebar-footer">v0.2 α · 今日助理</div>
     </aside>
 
     <main class="main">

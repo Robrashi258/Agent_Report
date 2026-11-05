@@ -61,8 +61,14 @@ function guessTags(content: string): string[] {
 /** 正则提取相对日期 → ISO8601；提取不到返回 null */
 export function extractDueDate(content: string, now = new Date()): string | null {
   // 明天/后天（可带上午/下午/晚上）
-  let m = content.match(/(明天|后天)(?:上午|早上)?(\d{1,2})[点时:：]?(\d{2})?/)
-  if (m) return shiftDays(now, m[1] === '明天' ? 1 : 2, timeOfDay(m[2], m[1] === '明天' ? 9 : 9))
+  let m = content.match(/(明天|后天)(上午|早上|下午|晚上)?(\d{1,2})(?:[点时:：](\d{1,2})?)?/)
+  if (m) {
+    let hour = Number(m[3])
+    const minute = Number(m[4] ?? 0)
+    if ((m[2] === '下午' || m[2] === '晚上') && hour < 12) hour += 12
+    if (hour > 23 || minute > 59) return null
+    return shiftDays(now, m[1] === '明天' ? 1 : 2, hour, minute)
+  }
   if (/(明天|后天)/.test(content)) {
     const day = content.includes('后天') ? 2 : 1
     return shiftDays(now, day, content.includes('下午') ? 14 : content.includes('晚上') ? 20 : 9)
@@ -127,11 +133,6 @@ export function extractDueDate(content: string, now = new Date()): string | null
 function weekdayNum(ch: string): number {
   const map: Record<string, number> = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 日: 0, 天: 0 }
   return map[ch] ?? 1
-}
-
-function timeOfDay(hourStr: string | undefined, fallback: number): { h: number; m: number } {
-  const h = hourStr ? Number(hourStr) : fallback
-  return { h, m: 0 }
 }
 
 function shiftDays(now: Date, days: number, h: number, m = 0): string {

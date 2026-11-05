@@ -1,7 +1,19 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC, type AppSettings, type Task, type TaskCreateInput, type TaskFilter, type TaskUpdateInput, type BatchCreateResult, type ChainGroup, type RebalanceResult } from '../shared/types'
+import { AGENT_IPC, type AgentRun } from '../shared/agent'
 
 const api = {
+  agentStart: (goal: string): Promise<AgentRun> => ipcRenderer.invoke(AGENT_IPC.start, goal),
+  agentSend: (id: string, text: string): Promise<AgentRun> => ipcRenderer.invoke(AGENT_IPC.send, id, text),
+  agentLatest: (): Promise<AgentRun | null> => ipcRenderer.invoke(AGENT_IPC.latest),
+  agentGet: (id: string): Promise<AgentRun> => ipcRenderer.invoke(AGENT_IPC.get, id),
+  agentConfirm: (id: string, accepted: boolean): Promise<AgentRun> => ipcRenderer.invoke(AGENT_IPC.confirm, id, accepted),
+  agentCancel: (id: string): Promise<AgentRun> => ipcRenderer.invoke(AGENT_IPC.cancel, id),
+  onAgentChanged: (cb: () => void): (() => void) => {
+    const listener = (): void => cb()
+    ipcRenderer.on(AGENT_IPC.changed, listener)
+    return () => ipcRenderer.removeListener(AGENT_IPC.changed, listener)
+  },
   taskCreate: (input: TaskCreateInput): Promise<Task> => ipcRenderer.invoke(IPC.taskCreate, input),
   taskBatchCreate: (text: string): Promise<BatchCreateResult> => ipcRenderer.invoke(IPC.taskBatchCreate, text),
   chainList: (): Promise<ChainGroup[]> => ipcRenderer.invoke(IPC.chainList),

@@ -16,7 +16,7 @@ export interface Task {
   summary: string | null // AI 提炼的一句话关键信息（长文本任务用）
   status: TaskStatus
   category: TaskCategory
-  tags: string[]
+  tags: readonly string[]
   importance: number // 1-5
   urgency: number // 1-5
   estimateMin: number // 预估耗时(分钟)

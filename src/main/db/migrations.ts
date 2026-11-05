@@ -66,4 +66,26 @@ export function runMigrations(db: Database.Database): void {
     `)
     db.pragma('user_version = 5')
   }
+  if (version < 6) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE agent_runs (
+          id TEXT PRIMARY KEY, goal TEXT NOT NULL, status TEXT NOT NULL,
+          messages_json TEXT NOT NULL DEFAULT '[]', pending_json TEXT,
+          turns INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE agent_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL REFERENCES agent_runs(id),
+          kind TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_agent_events_run ON agent_events(run_id, id);
+        CREATE TABLE agent_actions (
+          run_id TEXT NOT NULL REFERENCES agent_runs(id), action_key TEXT NOT NULL,
+          result_json TEXT NOT NULL, created_at TEXT NOT NULL,
+          PRIMARY KEY (run_id, action_key)
+        );
+      `)
+      db.pragma('user_version = 6')
+    })()
+  }
 }

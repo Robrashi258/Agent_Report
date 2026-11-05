@@ -54,7 +54,7 @@ export function computeScore(
 /** 是否已过期 */
 export function isOverdue(task: Pick<Task, 'dueAt'>, now = Date.now()): boolean {
   if (!task.dueAt) return false
-  return new Date(dueAt).getTime() < now
+  return new Date(task.dueAt).getTime() < now
 }
 
 function clamp01(v: number): number {

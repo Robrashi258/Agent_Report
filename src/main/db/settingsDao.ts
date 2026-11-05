@@ -25,7 +25,7 @@ export function getSettings(): AppSettings {
     const field = KEY_MAP[row.key]
     if (field) {
       try {
-        ;(result as Record<string, unknown>)[field] = JSON.parse(row.value)
+        ;(result as unknown as Record<string, unknown>)[field] = JSON.parse(row.value)
       } catch {
         // 忽略损坏的值，用默认值
       }

@@ -98,7 +98,7 @@ export async function aiBatchParse(settings: AppSettings, text: string): Promise
       urgency: clampInt(t.urgency, 1, 5, rule.urgency),
       category: categories.includes(t.category as string) ? (t.category as BatchParsedTask['category']) : rule.category,
       tags: Array.isArray(t.tags)
-        ? t.tags.filter((x): x is string => typeof x === 'string' && x.trim()).map(x => x.trim().slice(0, 10)).slice(0, 3)
+        ? t.tags.filter((x): x is string => typeof x === 'string' && x.trim().length > 0).map(x => x.trim().slice(0, 10)).slice(0, 3)
         : rule.tags,
       estimateMin: [15, 30, 60, 120, 240].includes(Number(t.estimate_min)) ? Number(t.estimate_min) : 30,
       dueAt: due,

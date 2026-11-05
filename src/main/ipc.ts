@@ -12,6 +12,10 @@ import * as agent from './agent/runner'
 import * as agentStore from './agent/store'
 import { PLANNING_IPC } from '@shared/planning'
 import * as planning from './planning/service'
+import { PROFILE_IPC, type MemoryInput, type FeedbackInput } from '@shared/profile'
+import * as memory from './memory/service'
+import * as feedback from './feedback/service'
+import { configureWorker, wakeWorker } from './feedback/worker'
 
 /** 广播任务变化（分析完成/手机端操作后刷新所有视图） */
 export function broadcastTaskChanged(win: BrowserWindow | null): void {
@@ -22,6 +26,20 @@ export function broadcastTaskChanged(win: BrowserWindow | null): void {
 
 export function registerIpcHandlers(getWin: () => BrowserWindow | null): void {
   const changed = (): void => broadcastTaskChanged(getWin())
+  const profileChanged = (): void => { const win = getWin(); if (win && !win.isDestroyed()) win.webContents.send(PROFILE_IPC.changed) }
+  configureWorker(profileChanged, agent.isAgentBusy)
+  ipcMain.handle(PROFILE_IPC.memoryList, () => memory.listFacts())
+  ipcMain.handle(PROFILE_IPC.memorySave, (_e, input: MemoryInput, version: number | null) => { const fact = memory.saveFact(input, version); profileChanged(); return fact })
+  ipcMain.handle(PROFILE_IPC.memoryRemove, (_e, id: string, version: number) => { memory.removeFact(id, version); profileChanged() })
+  ipcMain.handle(PROFILE_IPC.estimate, (_e, id: number) => { const task = taskDao.getTaskById(id); if (!task) throw new Error('任务不存在。'); return memory.durationEstimate(task) })
+  ipcMain.handle(PROFILE_IPC.state, () => feedback.profileState())
+  ipcMain.handle(PROFILE_IPC.enabled, (_e, enabled: boolean) => { feedback.setEnabled(enabled); profileChanged(); wakeWorker() })
+  ipcMain.handle(PROFILE_IPC.calibration, (_e, enabled: boolean) => { feedback.setCalibration(enabled); profileChanged(); changed() })
+  ipcMain.handle(PROFILE_IPC.read, (_e, id: string) => { feedback.markRead(id); profileChanged() })
+  ipcMain.handle(PROFILE_IPC.dismiss, (_e, id: string) => { feedback.dismiss(id); profileChanged() })
+  ipcMain.handle(PROFILE_IPC.completion, (_e, id: number) => feedback.completionForTask(id))
+  ipcMain.handle(PROFILE_IPC.feedback, (_e, input: FeedbackInput, messageId?: string) => { feedback.submitFeedback(input, messageId); profileChanged(); changed() })
+  ipcMain.handle(PROFILE_IPC.retry, () => { feedback.retryFailed(); wakeWorker(); profileChanged() })
   ipcMain.handle(PLANNING_IPC.read, (_e, start: string, end: string) => planning.snapshot(start, end))
   ipcMain.handle(PLANNING_IPC.saveCourse, (_e, input) => { planning.saveCourse(input); changed() })
   ipcMain.handle(PLANNING_IPC.deleteCourse, (_e, id: number) => { planning.deleteCourse(id); changed() })
@@ -34,6 +52,7 @@ export function registerIpcHandlers(getWin: () => BrowserWindow | null): void {
   agentStore.recoverInterruptedRuns()
   agent.setAgentNotify(() => {
     broadcastTaskChanged(getWin())
+    profileChanged()
     const win = getWin()
     if (win && !win.isDestroyed()) win.webContents.send(AGENT_IPC.changed)
   })
@@ -67,6 +86,7 @@ export function registerIpcHandlers(getWin: () => BrowserWindow | null): void {
   ipcMain.handle(IPC.taskComplete, (_e, id: number, done: boolean): Task | null => {
     const task = taskDao.completeTask(id, done)
     broadcastTaskChanged(getWin())
+    profileChanged(); wakeWorker()
     return task
   })
 
@@ -79,6 +99,7 @@ export function registerIpcHandlers(getWin: () => BrowserWindow | null): void {
   ipcMain.handle(IPC.taskDelete, (_e, id: number): boolean => {
     const ok = taskDao.deleteTask(id)
     if (ok) broadcastTaskChanged(getWin())
+    profileChanged()
     return ok
   })
 

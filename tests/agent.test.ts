@@ -16,6 +16,10 @@ import type { ModelMessage, ModelTransport } from '../src/main/agent/model'
 import { planningTests } from './planning.test'
 import * as planning from '../src/main/planning/service'
 import { dateKey, at } from '../src/main/planning/engine'
+import { profileTests } from './profile.test'
+import * as memory from '../src/main/memory/service'
+import * as feedback from '../src/main/feedback/service'
+import { processNext } from '../src/main/feedback/worker'
 
 app.setPath('userData', mkdtempSync(join(tmpdir(), 'suishou-agent-tests-')))
 let passed = 0
@@ -38,7 +42,7 @@ app.whenReady().then(async () => {
   try {
     setSettings(configured)
     const taskId = seed('测试报告'), otherId = seed('另一份报告')
-    await test('迁移至v7且重复执行不破坏数据', () => { runMigrations(getDb()); assert.equal(getDb().pragma('user_version', { simple: true }), 7); assert.ok(tasks.getTaskById(taskId)) })
+    await test('迁移至v8且重复执行不破坏数据', () => { runMigrations(getDb()); assert.equal(getDb().pragma('user_version', { simple: true }), 8); assert.ok(tasks.getTaskById(taskId)) })
     await test('带截止的过期判定不抛异常', () => { assert.equal(isOverdue({ dueAt: '2026-01-01T12:00:00' }, new Date('2026-01-02').getTime()), true); assert.equal(isOverdue({ dueAt: null }), false); assert.ok(Number.isFinite(computeScore(tasks.getTaskById(taskId)!))) })
     await test('明天下午与分钟日期解析', () => { const now = new Date(2026, 10, 5, 10); assert.equal(extractDueDate('明天下午3:30交报告', now), '2026-11-06T15:30:00'); assert.equal(extractDueDate('明天27:00', now), null) })
     await test('自动重评不锁定、人工修改锁定', () => { tasks.updateTask({ id: taskId, importance: 4 }, 'review'); assert.equal(tasks.getTaskById(taskId)!.manualLocked, false); tasks.updateTask({ id: otherId, importance: 4 }); assert.equal(tasks.getTaskById(otherId)!.manualLocked, true) })
@@ -140,7 +144,7 @@ app.whenReady().then(async () => {
     })
     await test('连续工具调用达到预算后停止', async () => {
       const run = create(); await drive(run, async () => call('list_tasks', { limit: 1 }))
-      assert.equal(store.getRun(run).status, 'failed'); assert.ok(store.getRun(run).events.some(e => e.text.includes('6次')))
+      assert.equal(store.getRun(run).status, 'failed'); assert.ok(store.getRun(run).events.some(e => e.text.includes('8次')))
     })
     await test('普通文本结束会要求模型纠正为结构化等待动作', async () => {
       const run = create(); let round = 0
@@ -163,12 +167,14 @@ app.whenReady().then(async () => {
       store.recoverInterruptedRuns(); assert.equal(store.getRun(run).status, 'failed'); assert.equal(JSON.parse(store.row(run).messages_json).length, 2)
     })
     await planningTests(test)
+    await profileTests(test)
     if (process.argv.includes('--live')) {
       const keyFile = process.env.AGENT_TEST_KEY_FILE
       if (!keyFile) throw new Error('真实验证需要AGENT_TEST_KEY_FILE。')
       const key = readFileSync(keyFile, 'utf8').match(/sk-[A-Za-z0-9_.-]+/)?.[0]
       if (!key) throw new Error('未读到凭据。')
       setSettings({ aiBaseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', aiApiKey: key, aiModel: 'qwen-plus' })
+      if (!process.argv.includes('--profile-live')) {
       await test('真实千问原生工具查询并回传结果', async () => {
         const run = create('请查询当前未完成任务，只列出任务名，不修改数据。')
         await drive(run)
@@ -225,6 +231,41 @@ app.whenReady().then(async () => {
         assert.ok(result.events.some(e => e.kind === 'tool' && e.text.includes('preview_plan') && e.text.includes('unscheduled')))
         assert.equal(result.pending, null); assert.equal(planning.listBlocks().some(b => b.taskId === id), false)
         assert.equal(tasks.getTaskById(id)!.deadlineAt, deadline)
+      })
+      }
+      await test('真实千问按需检索确认记忆并使用来源回答', async () => {
+        memory.saveFact({ scope: '数学分析', key: '学习阶段', value: '数学分析目前初学，需要先理解例题' }, null)
+        const run = create('我确认过的数学分析学习阶段是什么？请先检索个人记忆，不要猜。')
+        await drive(run)
+        const result=store.getRun(run)
+        assert.ok(['completed','waiting_user'].includes(result.status),JSON.stringify(result.events))
+        assert.ok(result.events.some(e=>e.kind==='tool'&&e.text.includes('search_memory')&&e.text.includes('memory:')))
+        assert.ok(result.events.some(e=>e.kind==='assistant'&&e.text.includes('初学')),JSON.stringify(result.events))
+      })
+      await test('真实千问读取个人耗时校准，不反复乘系数', async () => {
+        for(let i=0;i<5;i++) {
+          const id=seed(`真实验证-历史${i}`); tasks.updateTask({id,estimateMin:60,estimateGroup:'数学分析'}); tasks.completeTask(id,true)
+          const event=feedback.completionForTask(id)!.event
+          feedback.submitFeedback({eventId:event.id,actualMin:90,difficulty:'fit',interrupted:false,scopeChanged:false,note:''})
+        }
+        const id=seed('个人估时演示');tasks.updateTask({id,estimateMin:60,estimateGroup:'数学分析'})
+        const run=create('请查询“个人估时演示”并使用estimate_duration工具，告诉我个人校准建议多少分钟，不修改数据。')
+        await drive(run); const result=store.getRun(run)
+        assert.ok(['completed','waiting_user'].includes(result.status),JSON.stringify(result.events))
+        assert.ok(result.events.some(e=>e.kind==='tool'&&e.text.includes('estimate_duration')))
+        assert.ok(result.events.some(e=>e.kind==='assistant'&&e.text.includes('75')))
+        assert.equal(tasks.getTaskById(id)!.baseEstimateMin,60)
+      })
+      await test('真实千问后台自主选择追问或静默，完成不受影响', async () => {
+        const id=seed('初次学习微积分第三章例题'); tasks.updateTask({id,estimateMin:60,estimateGroup:'微积分'}); tasks.completeTask(id,true)
+        const event=feedback.completionForTask(id)!.event
+        await processNext()
+        const job=getDb().prepare('SELECT status FROM completion_jobs WHERE event_id=?').get(event.id) as {status:string}
+        assert.ok(['asked','silent'].includes(job.status),job.status)
+        assert.equal(tasks.getTaskById(id)!.status,'done')
+        const messages=feedback.profileState().messages.filter(m=>m.eventId===event.id)
+        assert.equal(messages.length,job.status==='asked'?1:0)
+        console.log(`LIVE completion decision=${job.status}`)
       })
       // 测试库退出后清空密钥，日志从不打印凭据。
       setSettings({ aiApiKey: '' })

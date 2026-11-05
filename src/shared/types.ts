@@ -20,6 +20,10 @@ export interface Task {
   importance: number // 1-5
   urgency: number // 1-5
   estimateMin: number // 预估耗时(分钟)
+  baseEstimateMin: number
+  estimateGroup: string
+  estimateSource: string
+  completionSeq: number
   dueAt: string | null // 兼容评分接口：仅映射已确认的deadlineAt，永不表示执行时间
   deadlineAt: string | null
   deadlineConfirmed: boolean
@@ -53,6 +57,7 @@ export interface TaskUpdateInput {
   importance?: number
   urgency?: number
   estimateMin?: number
+  estimateGroup?: string
   dueAt?: string | null
   deadlineAt?: string | null
 }

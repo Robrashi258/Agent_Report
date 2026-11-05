@@ -4,6 +4,7 @@ import { mkdirSync } from 'node:fs'
 import { registerIpcHandlers } from './ipc'
 import { closeDb } from './db/database'
 import { onAppStart } from './ai/analyzer'
+import { startWorker, stopWorker } from './feedback/worker'
 
 // win32 通知必设
 app.setAppUserModelId('com.personal.plan')
@@ -51,6 +52,7 @@ function createWindow(): void {
 app.whenReady().then(() => {
   registerIpcHandlers(() => mainWindow)
   createWindow()
+  startWorker()
   // 启动钩子：恢复中断的收件箱分析 + 每日重评
   onAppStart()
   // 第二阶段只通过试排/确认保存执行块，不在启动时改写任务日期。
@@ -65,5 +67,6 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
+  stopWorker()
   closeDb()
 })

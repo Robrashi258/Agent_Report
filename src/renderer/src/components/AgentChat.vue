@@ -9,7 +9,8 @@ const busy = ref(false)
 const error = ref('')
 const messageList = ref<HTMLElement | null>(null)
 const priority = computed(() => run.value?.pending && !('type' in run.value.pending) ? run.value.pending : null)
-const plan = computed(() => run.value?.pending && 'type' in run.value.pending ? run.value.pending.preview : null)
+const plan = computed(() => run.value?.pending && 'type' in run.value.pending && run.value.pending.type==='plan' ? run.value.pending.preview : null)
+const memory = computed(() => run.value?.pending && 'type' in run.value.pending && run.value.pending.type==='memory' ? run.value.pending : null)
 watch(() => run.value?.events.length, async () => {
   await nextTick()
   if (messageList.value) messageList.value.scrollTop = messageList.value.scrollHeight
@@ -70,11 +71,12 @@ onUnmounted(() => removeListener?.())
       <div v-if="run.status === 'running'" class="working">正在查看信息… <button class="small" @click="stop">停止</button></div>
     </div>
     <div v-if="run?.pending" class="proposal">
+      <template v-if="memory"><strong>确认记忆：{{ memory.fact.scope }} / {{ memory.fact.key }}</strong><p v-if="memory.before">原值：{{ memory.before.value }}</p><p>新值：{{ memory.fact.value }}</p><p>{{ memory.fact.expiresAt ? '有效至 '+new Date(memory.fact.expiresAt).toLocaleString('zh-CN') : '长期有效，可在个人记忆中移除' }}</p></template>
       <PlanPreviewCard v-if="plan" :preview="plan" />
       <template v-if="priority"><strong>调整「{{ priority.title }}」</strong>
       <p>重要度 {{ priority.before.importance }} → {{ priority.after.importance }}　紧急度 {{ priority.before.urgency }} → {{ priority.after.urgency }}</p>
       <p>{{ priority.reason }}</p></template>
-      <div class="proposal-actions"><button class="primary" :disabled="busy" @click="confirm(true)">{{ plan ? '确认保存计划' : '确认调整' }}</button><button class="small" :disabled="busy" @click="confirm(false)">放弃</button></div>
+      <div class="proposal-actions"><button class="primary" :disabled="busy" @click="confirm(true)">{{ memory ? '确认保存记忆' : plan ? '确认保存计划' : '确认调整' }}</button><button class="small" :disabled="busy" @click="confirm(false)">放弃</button></div>
     </div>
     <p v-if="error" role="alert" class="chat-error">{{ error }}</p>
     <form class="composer" @submit.prevent="send">

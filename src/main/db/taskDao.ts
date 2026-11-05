@@ -1,6 +1,8 @@
 import { getDb } from './database'
 import type { Task, TaskCreateInput, TaskFilter, TaskUpdateInput, TaskStatus, TaskCategory, AiStatus, AiAnalysisResult, BatchParsedTask } from '@shared/types'
 import { localSummary, toLocalIso } from '../ai/rules'
+import { randomUUID } from 'node:crypto'
+import { scopeKey } from '../memory/service'
 
 /** DB 行 → Task DTO */
 interface TaskRow {
@@ -29,6 +31,10 @@ interface TaskRow {
   deadline_at: string | null
   deadline_confirmed: number
   deadline_source: string
+  base_estimate_min: number
+  estimate_group: string
+  estimate_source: string
+  completion_seq: number
 }
 
 function rowToTask(r: TaskRow): Task {
@@ -48,6 +54,10 @@ function rowToTask(r: TaskRow): Task {
     importance: r.importance,
     urgency: r.urgency,
     estimateMin: r.estimate_min,
+    baseEstimateMin: r.base_estimate_min,
+    estimateGroup: r.estimate_group || r.category,
+    estimateSource: r.estimate_source,
+    completionSeq: r.completion_seq,
     dueAt: r.deadline_confirmed ? r.deadline_at : null,
     deadlineAt: r.deadline_at,
     deadlineConfirmed: r.deadline_confirmed === 1,
@@ -117,8 +127,8 @@ export function batchCreateTasks(items: BatchParsedTask[], aiStatus: AiStatus): 
     })
     // 解析日期是候选截止；范围任务的范围不等同外部截止。
     const ids = db.prepare('SELECT id FROM tasks WHERE project_id=? ORDER BY chain_order').all(projectId) as { id: number }[]
-    ids.forEach((row, i) => db.prepare('UPDATE tasks SET deadline_at=?,deadline_confirmed=?,deadline_source=? WHERE id=?')
-      .run(rows[i].dueAt, rows[i].dueAt ? 0 : 1, rows[i].dueAt ? 'parsed' : 'none', row.id))
+    ids.forEach((row, i) => db.prepare('UPDATE tasks SET deadline_at=?,deadline_confirmed=?,deadline_source=?,base_estimate_min=?,estimate_source=? WHERE id=?')
+      .run(rows[i].dueAt, rows[i].dueAt ? 0 : 1, rows[i].dueAt ? 'parsed' : 'none', rows[i].estimateMin, aiStatus === 'ok' ? 'model' : 'rule', row.id))
   })
   tx(items)
   return items.length
@@ -130,12 +140,14 @@ export function applyAnalysis(id: number, result: AiAnalysisResult, aiStatus: Ai
   db.prepare(
     `UPDATE tasks SET
        importance = ?, urgency = ?, category = ?, tags = ?,
-       estimate_min = CASE WHEN EXISTS(SELECT 1 FROM plan_blocks WHERE task_id=tasks.id) THEN estimate_min ELSE ? END,
+       estimate_min = CASE WHEN estimate_source='user' OR EXISTS(SELECT 1 FROM plan_blocks WHERE task_id=tasks.id) THEN estimate_min ELSE ? END,
        due_at = COALESCE(due_at, ?), summary = ?,
        status = 'pending', ai_status = ?, updated_at = ?,
        deadline_at = CASE WHEN deadline_source='user' OR EXISTS(SELECT 1 FROM plan_blocks WHERE task_id=tasks.id) THEN deadline_at ELSE ? END,
        deadline_confirmed = CASE WHEN deadline_source='user' OR EXISTS(SELECT 1 FROM plan_blocks WHERE task_id=tasks.id) THEN deadline_confirmed ELSE ? END,
-       deadline_source = CASE WHEN deadline_source='user' OR EXISTS(SELECT 1 FROM plan_blocks WHERE task_id=tasks.id) THEN deadline_source ELSE ? END
+       deadline_source = CASE WHEN deadline_source='user' OR EXISTS(SELECT 1 FROM plan_blocks WHERE task_id=tasks.id) THEN deadline_source ELSE ? END,
+       base_estimate_min = CASE WHEN estimate_source='user' OR EXISTS(SELECT 1 FROM plan_blocks WHERE task_id=tasks.id) THEN base_estimate_min ELSE ? END,
+       estimate_source = CASE WHEN estimate_source='user' OR EXISTS(SELECT 1 FROM plan_blocks WHERE task_id=tasks.id) THEN estimate_source ELSE ? END
      WHERE id = ? AND status = 'inbox'`
   ).run(
     result.importance,
@@ -146,7 +158,7 @@ export function applyAnalysis(id: number, result: AiAnalysisResult, aiStatus: Ai
     result.dueAt,
     result.summary,
     aiStatus,
-    now(), result.dueAt, result.dueAt ? 0 : 1, result.dueAt ? 'parsed' : 'none',
+    now(), result.dueAt, result.dueAt ? 0 : 1, result.dueAt ? 'parsed' : 'none', result.estimateMin, aiStatus === 'ok' ? 'model' : 'rule',
     id
   )
 }
@@ -318,6 +330,12 @@ export function updateTask(input: TaskUpdateInput, source: 'user' | 'review' = '
     if (planned && input.estimateMin * 60000 > planned.end_at - planned.start_at) throw new Error('新耗时超过现有执行块，请先在日程移除该安排再修改。')
     sets.push('estimate_min = ?')
     params.push(Math.max(5, Math.round(input.estimateMin)))
+    sets.push('base_estimate_min = ?', "estimate_source = 'user'")
+    params.push(input.estimateMin)
+  }
+  if (input.estimateGroup !== undefined) {
+    if (typeof input.estimateGroup !== 'string' || !input.estimateGroup.trim() || input.estimateGroup.length > 60) throw new Error('估时分组请填写1—60字，如“数学分析”。')
+    sets.push('estimate_group = ?'); params.push(scopeKey(input.estimateGroup))
   }
   const deadline = input.deadlineAt !== undefined ? input.deadlineAt : input.dueAt
   if (deadline !== undefined) {
@@ -341,17 +359,33 @@ export function updateTask(input: TaskUpdateInput, source: 'user' | 'review' = '
 /** 完成/取消完成 */
 export function completeTask(id: number, done: boolean): Task | null {
   const db = getDb()
-  const ts = now()
-  if (done) {
-    db.prepare(
-      `UPDATE tasks SET status = 'done', completed_at = ?, updated_at = ? WHERE id = ?`
-    ).run(ts, ts, id)
-  } else {
-    db.prepare(
-      `UPDATE tasks SET status = 'pending', completed_at = NULL, updated_at = ? WHERE id = ?`
-    ).run(ts, id)
-  }
-  return getTaskById(id)
+  if (!Number.isSafeInteger(id) || id < 1 || typeof done !== 'boolean') throw new Error('完成参数无效。')
+  return db.transaction(() => {
+    const task = getTaskById(id), ts = now()
+    if (!task || task.status === 'archived') return null
+    if ((task.status === 'done') === done) return task
+    if (done) {
+      const cycle = task.completionSeq + 1, eventId = randomUUID()
+      const block = db.prepare('SELECT start_at,end_at FROM plan_blocks WHERE task_id=?').get(id) as { start_at: number; end_at: number } | undefined
+      db.prepare("UPDATE tasks SET status='done',completed_at=?,updated_at=?,completion_seq=? WHERE id=?").run(ts, ts, cycle, id)
+      db.prepare(`INSERT INTO completion_events(id,task_id,cycle,title,group_key,estimate_source,base_min,planned_min,had_plan,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?)`).run(eventId, id, cycle, task.summary || task.content, scopeKey(task.estimateGroup), task.estimateSource,
+          task.baseEstimateMin, block ? (block.end_at - block.start_at) / 60000 : task.estimateMin, block ? 1 : 0, ts)
+      const config = db.prepare('SELECT enabled FROM profile_settings WHERE id=1').get() as { enabled: number }
+      if (config.enabled) db.prepare('INSERT INTO completion_jobs(event_id) VALUES(?)').run(eventId)
+    } else {
+      db.prepare("UPDATE tasks SET status='pending',completed_at=NULL,updated_at=? WHERE id=?").run(ts, id)
+      invalidateCompletions(id)
+    }
+    return getTaskById(id)
+  })()
+}
+
+function invalidateCompletions(id: number): void {
+  const db = getDb()
+  db.prepare('UPDATE completion_events SET valid=0 WHERE task_id=?').run(id)
+  db.prepare("UPDATE completion_jobs SET status='cancelled',token=NULL WHERE event_id IN (SELECT id FROM completion_events WHERE task_id=?)").run(id)
+  db.prepare("UPDATE followup_messages SET state='cancelled',is_read=1 WHERE event_id IN (SELECT id FROM completion_events WHERE task_id=?)").run(id)
 }
 
 /** 推迟到明天：due_at = 明天（保持时间部分），无截止则明天 23:59；snooze_count+1 */
@@ -414,10 +448,11 @@ export function displaceTaskTo(id: number, newDueIso: string): number {
 /** 软删除 → archived */
 export function deleteTask(id: number): boolean {
   const db = getDb()
-  const info = db
-    .prepare(`UPDATE tasks SET status = 'archived', updated_at = ? WHERE id = ?`)
-    .run(now(), id)
-  return info.changes > 0
+  return db.transaction(() => {
+    const info = db.prepare("UPDATE tasks SET status='archived',updated_at=? WHERE id=?").run(now(), id)
+    invalidateCompletions(id)
+    return info.changes > 0
+  })()
 }
 
 // ===== 项目链条 =====

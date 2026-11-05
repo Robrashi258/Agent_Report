@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, onMounted, onUnmounted, watch } from 'vue'
 import type { Task } from '@shared/types'
 import { computeScore } from '@shared/priority'
 import { tasksActions } from '../stores/tasks'
 import { inputDate } from '../lib/planningTime'
+import type { CompletionDetail, DurationEstimate } from '@shared/profile'
+import CompletionFeedbackEditor from './CompletionFeedbackEditor.vue'
 
 const props = defineProps<{ task: Task }>()
 const emit = defineEmits<{ removed: [] }>()
@@ -13,16 +15,28 @@ const done = computed(() => props.task.status === 'done')
 const score = computed(() => computeScore(props.task))
 const adjustOpen = ref(false)
 const timingOpen = ref(false), deadlineInput = ref(''), estimateInput = ref(30), timingBusy = ref(false), timingError = ref('')
+const estimateGroup = ref(''), feedbackDetail = ref<CompletionDetail | null>(null), feedbackError = ref(''), personal = ref<DurationEstimate | null>(null)
+let offProfile: (() => void) | undefined
+async function refreshEstimate(): Promise<void> { try { personal.value = await window.api.durationEstimate(props.task.id) } catch { personal.value=null } }
+onMounted(() => { void refreshEstimate(); offProfile=window.api.onProfileChanged(() => void refreshEstimate()) })
+onUnmounted(() => offProfile?.())
+watch(() => [props.task.baseEstimateMin,props.task.estimateGroup,props.task.estimateSource], () => void refreshEstimate())
+async function openFeedback(): Promise<void> {
+  if(feedbackDetail.value){feedbackDetail.value=null;return}
+  try { const result=await window.api.completionForTask(props.task.id); if(!result?.event.valid)throw new Error('这条旧完成记录没有有效估时快照，暂不能用于个人校准。'); feedbackDetail.value=result; feedbackError.value='' }
+  catch(e){feedbackError.value=e instanceof Error?e.message:String(e)}
+}
 function openTiming(): void {
   timingOpen.value = !timingOpen.value; timingError.value = ''
   deadlineInput.value = inputDate(props.task.deadlineAt || (!props.task.deadlineConfirmed ? props.task.legacyDueAt : null))
   estimateInput.value = props.task.estimateMin
+  estimateGroup.value = props.task.estimateGroup
 }
 async function saveTiming(): Promise<void> {
   timingBusy.value = true; timingError.value = ''
   try {
     if (!Number.isInteger(estimateInput.value) || estimateInput.value < 5 || estimateInput.value > 1440) throw new Error('耗时请填写5—1440分钟。')
-    await tasksActions.updateTask({ id: props.task.id, deadlineAt: deadlineInput.value ? new Date(deadlineInput.value).toISOString() : null, estimateMin: estimateInput.value })
+    await tasksActions.updateTask({ id: props.task.id, deadlineAt: deadlineInput.value ? new Date(deadlineInput.value).toISOString() : null, estimateMin: estimateInput.value, estimateGroup: estimateGroup.value })
     timingOpen.value = false
   } catch (e) { timingError.value = e instanceof Error ? e.message : String(e) }
   finally { timingBusy.value = false }
@@ -79,7 +93,8 @@ function formatDate(d: Date): string {
 }
 
 async function toggle(): Promise<void> {
-  await tasksActions.completeTask(props.task.id, !done.value)
+  try { await tasksActions.completeTask(props.task.id, !done.value); feedbackDetail.value=null; feedbackError.value='' }
+  catch(e){feedbackError.value=e instanceof Error?e.message:String(e)}
 }
 
 async function remove(): Promise<void> {
@@ -148,6 +163,7 @@ async function remove(): Promise<void> {
     <div class="actions">
       <button v-if="!done" class="act" @click="adjustOpen = !adjustOpen" title="手动调整重要/紧急">调级</button>
       <button v-if="!done" class="act" @click="openTiming" title="设置真正的截止时间和预计耗时">时间设置</button>
+      <button v-if="done" class="act" @click="openFeedback">完成反馈</button>
       <button class="act danger" @click="remove" title="删除">删除</button>
     </div>
   </div>
@@ -155,14 +171,19 @@ async function remove(): Promise<void> {
     <p v-if="!task.deadlineConfirmed">当前日期是旧版记录或自动提取的候选，请核对：这是必须提交的期限，还是只是准备执行的日期？</p>
     <label>截止时间（留空表示无截止）<input v-model="deadlineInput" type="datetime-local" /></label>
     <label>预计耗时（分钟）<input v-model.number="estimateInput" type="number" min="5" max="1440" step="5" /></label>
+    <label>估时分组（同类任务一起校准）<input v-model="estimateGroup" maxlength="60" placeholder="例如：数学分析" /></label>
     <span>执行时间请在日程或今日助理中试排，修改执行安排不会修改此截止。</span>
     <p v-if="timingError" role="alert">{{ timingError }}</p>
     <button class="act" :disabled="timingBusy" @click="saveTiming">确认时间信息</button>
   </div>
   <p v-else-if="!task.deadlineConfirmed" class="time-unconfirmed">日期待确认：请打开“时间设置”，确认真实截止或留空。</p>
+  <p v-if="!done && personal?.sampleCount" class="time-unconfirmed">{{ personal.applied ? '个人估时' : '参考估时' }} {{ personal.estimateMin }}分钟 · 原始{{ personal.baseMin }}分钟 · {{ personal.sampleCount }}个有效样本（{{ personal.groupKey }}）</p>
+  <p v-if="feedbackError" role="alert" class="time-unconfirmed">{{ feedbackError }}</p>
+  <div v-if="feedbackDetail && done" class="feedback-panel"><CompletionFeedbackEditor :detail="feedbackDetail" @saved="feedbackDetail=null" /></div>
 </template>
 
 <style scoped>
+.feedback-panel{padding:8px 14px;background:var(--primary-light);border-radius:8px;margin-bottom:12px}
 .timing-editor{display:flex;flex-wrap:wrap;gap:10px;align-items:end;padding:12px;background:var(--primary-light);border-radius:8px;margin:4px 0 10px}.timing-editor label{display:grid;gap:5px;font-size:12px}.timing-editor input{padding:7px;border:1px solid var(--border);border-radius:5px;background:var(--panel);color:var(--text)}.timing-editor>span,.timing-editor>p{width:100%;font-size:12px;line-height:1.6}.time-unconfirmed{font-size:12px;color:#986620;margin:0 0 10px 12px}
 .task-item {
   display: flex;

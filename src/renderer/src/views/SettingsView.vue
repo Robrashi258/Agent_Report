@@ -69,9 +69,10 @@ defineExpose({ save })
 
     <section class="panel">
       <h3>截止提醒</h3>
+      <p class="tip">系统截止通知为后续功能；完成任务后的回顾只在今日显示消息，不弹窗。</p>
       <div class="form">
         <label class="row">
-          <input v-model="form.notifyEnabled" type="checkbox" />
+          <input v-model="form.notifyEnabled" type="checkbox" disabled />
           <span>临近截止时弹系统通知</span>
         </label>
         <label>

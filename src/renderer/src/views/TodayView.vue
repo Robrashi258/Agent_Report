@@ -5,6 +5,7 @@ import { computeScore, isOverdue } from '@shared/priority'
 import TaskItem from '../components/TaskItem.vue'
 import AgentChat from '../components/AgentChat.vue'
 import TodayPlan from '../components/TodayPlan.vue'
+import FollowupInbox from '../components/FollowupInbox.vue'
 
 // 60s 重算：截止临近分数上升，视图自动重排
 const tick = ref(0)
@@ -47,6 +48,7 @@ const todayLabel = new Date().toLocaleDateString('zh-CN', { month: 'long', day: 
     </header>
 
     <TodayPlan />
+    <FollowupInbox />
     <AgentChat />
 
     <div v-if="overdue.length" class="overdue-zone">

@@ -4,6 +4,7 @@ import * as tasks from '../db/taskDao'
 import { computeScore } from '@shared/priority'
 import type { Course, CourseInput, PlanningSettings, PlanningSnapshot, PlanBlock, PlanPreview, Occupancy } from '@shared/planning'
 import { at, day, dateKey, daysBetween, freeIntervals, courseOccupancy, trial, overlaps } from './engine'
+import { durationEstimate, calibrationVersion } from '../memory/service'
 
 function integer(v: unknown, min: number, max: number): number {
   if (typeof v !== 'number' || !Number.isInteger(v) || v < min || v > max) throw new Error('数字参数超出允许范围。')
@@ -24,8 +25,8 @@ export function listBlocks(): PlanBlock[] {
 }
 export function snapshot(startDate: string, endDate: string): PlanningSnapshot {
   const dates = daysBetween(startDate, endDate), courses = listCourses(), blocks = listBlocks(), config = settings()
-  const taskData = tasks.listTasks().map(t => [t.id, t.status, t.updatedAt, t.estimateMin, t.deadlineAt, t.deadlineConfirmed, t.rangeStart, t.rangeEnd])
-  const version = createHash('sha256').update(JSON.stringify([taskData, courses, blocks, config, Intl.DateTimeFormat().resolvedOptions().timeZone])).digest('hex')
+  const taskData = tasks.listTasks().map(t => [t.id, t.status, t.updatedAt, t.estimateMin, t.baseEstimateMin, t.estimateGroup, t.estimateSource, t.deadlineAt, t.deadlineConfirmed, t.rangeStart, t.rangeEnd])
+  const version = createHash('sha256').update(JSON.stringify([taskData, courses, blocks, config, calibrationVersion(), Intl.DateTimeFormat().resolvedOptions().timeZone])).digest('hex')
   const start = at(startDate, 0), end = at(endDate, 1440)
   const occupied: Occupancy[] = [...courseOccupancy(courses, dates), ...blocks.filter(b => b.start < end && start < b.end).map(b => ({ ...b, kind: 'task' as const }))]
   return { startDate, endDate, version, settings: config, courses, blocks: blocks.filter(b => b.start < end && start < b.end), occupied }
@@ -98,7 +99,7 @@ export function preview(taskIds: number[], startDate: string, endDate: string, r
   // 部分重排失败时保留其旧块并重新计算，不能把未移走的旧块当作空闲。
   for (let pass = 0; pass <= selected.length; pass++) {
     const occupied = snap.occupied.filter(b => b.kind === 'course' || !taskIds.includes(b.taskId!) || fixedIds.has(b.taskId!))
-    result = trial(selected.filter(t => !fixedIds.has(t.id)).map(t => ({ id: t.id, title: t.summary || t.content, duration: t.estimateMin, score: computeScore(t, now),
+    result = trial(selected.filter(t => !fixedIds.has(t.id)).map(t => ({ id: t.id, title: t.summary || t.content, duration: durationEstimate(t).estimateMin, score: computeScore(t, now),
       deadline: t.deadlineAt ? new Date(t.deadlineAt).getTime() : null, confirmed: t.deadlineConfirmed,
       earliestDate: t.rangeStart, latestDate: t.rangeEnd })), dates, effectiveSettings, occupied, now)
     const newlyRetained = result.unscheduled.filter(u => previous.some(b => b.taskId === u.taskId) && !fixedIds.has(u.taskId))
@@ -106,6 +107,7 @@ export function preview(taskIds: number[], startDate: string, endDate: string, r
     newlyRetained.forEach(u => { fixedIds.add(u.taskId); retainedReasons.set(u.taskId, `${u.reason} 原执行安排保留。`) })
   }
   retainedReasons.forEach((reason, id) => result.unscheduled.push({ taskId: id, title: selected.find(t => t.id === id)!.content, reason }))
+  result.blocks.forEach(b => { const estimate = durationEstimate(selected.find(t => t.id === b.taskId)!); if (estimate.applied) b.reason += ` 个人估时${estimate.baseMin}→${estimate.estimateMin}分钟，${estimate.sampleCount}个有效样本（系数${estimate.factor.toFixed(2)}）。` })
   const data: PlanPreview = { id: randomUUID(), runId, startDate, endDate, version: snap.version, createdAt: new Date(now).toISOString(), taskIds, previous,
     timeWindow: { startMin: effectiveSettings.startMin, endMin: effectiveSettings.endMin }, ...result }
   getDb().prepare('INSERT INTO plan_previews(id,run_id,json,created_at) VALUES(?,?,?,?)').run(data.id, runId, JSON.stringify(data), data.createdAt)
@@ -124,7 +126,7 @@ export function commit(id: string, runId: string | null, now = Date.now()): { sa
     if (existing.committed_json) return JSON.parse(existing.committed_json)
     if (!p.blocks.length) throw new Error('没有可保存的执行时段。')
     if (now - new Date(p.createdAt).getTime() > 30 * 60000) throw new Error('试排已过期，请重新试排。')
-    if (snapshot(p.startDate, p.endDate).version !== p.version) throw new Error('任务、课表或计划已变化，请重新试排。')
+    if (snapshot(p.startDate, p.endDate).version !== p.version) throw new Error('任务、课表、个人估时或计划已变化，请重新试排。')
     // 课程/容量等输入快照必须保持一致，并重新检查真实当前时间和截止。
     for (const b of p.blocks) {
       const task = tasks.getTaskById(b.taskId)!
@@ -151,7 +153,7 @@ function validateBlocks(p: PlanPreview, now: number): void {
     const t = tasks.getTaskById(b.taskId), date = dateKey(b.start)
     if (!t || t.status !== 'pending' || !t.deadlineConfirmed || b.start < now || b.end <= b.start || date < p.startDate || date > p.endDate ||
       b.start < at(date, Math.max(p.timeWindow.startMin, snap.settings.startMin)) || b.end > at(date, Math.min(p.timeWindow.endMin, snap.settings.endMin)) ||
-      b.end - b.start < Math.ceil(t.estimateMin / 15) * 15 * 60000 || (t.deadlineAt && b.end > new Date(t.deadlineAt).getTime()) ||
+      b.end - b.start < Math.ceil(durationEstimate(t).estimateMin / 15) * 15 * 60000 || (t.deadlineAt && b.end > new Date(t.deadlineAt).getTime()) ||
       (t.rangeStart && date < t.rangeStart) || (t.rangeEnd && date > t.rangeEnd)) throw new Error('执行块不满足时间约束。')
     if (others.some(o => overlaps(b, o)) || p.blocks.some(o => o !== b && overlaps(b, o))) throw new Error('执行块存在冲突。')
     const sameDay = all.filter(o => o.kind === 'task' && dateKey(o.start) === date)

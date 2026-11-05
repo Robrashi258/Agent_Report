@@ -2,8 +2,22 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { IPC, type AppSettings, type Task, type TaskCreateInput, type TaskFilter, type TaskUpdateInput, type BatchCreateResult, type ChainGroup, type RebalanceResult } from '../shared/types'
 import { AGENT_IPC, type AgentRun } from '../shared/agent'
 import { PLANNING_IPC, type PlanningSnapshot, type CourseInput, type PlanningSettings, type PlanPreview } from '../shared/planning'
+import { PROFILE_IPC, type MemoryFact, type MemoryInput, type DurationEstimate, type ProfileState, type CompletionDetail, type FeedbackInput } from '../shared/profile'
 
 const api = {
+  memoryList: (): Promise<MemoryFact[]> => ipcRenderer.invoke(PROFILE_IPC.memoryList),
+  memorySave: (input: MemoryInput, version: number | null): Promise<MemoryFact> => ipcRenderer.invoke(PROFILE_IPC.memorySave, input, version),
+  memoryRemove: (id: string, version: number): Promise<void> => ipcRenderer.invoke(PROFILE_IPC.memoryRemove, id, version),
+  durationEstimate: (taskId: number): Promise<DurationEstimate> => ipcRenderer.invoke(PROFILE_IPC.estimate, taskId),
+  profileState: (): Promise<ProfileState> => ipcRenderer.invoke(PROFILE_IPC.state),
+  feedbackEnabled: (enabled: boolean): Promise<void> => ipcRenderer.invoke(PROFILE_IPC.enabled, enabled),
+  calibrationEnabled: (enabled: boolean): Promise<void> => ipcRenderer.invoke(PROFILE_IPC.calibration, enabled),
+  messageRead: (id: string): Promise<void> => ipcRenderer.invoke(PROFILE_IPC.read, id),
+  messageDismiss: (id: string): Promise<void> => ipcRenderer.invoke(PROFILE_IPC.dismiss, id),
+  completionForTask: (id: number): Promise<CompletionDetail | null> => ipcRenderer.invoke(PROFILE_IPC.completion, id),
+  feedbackSave: (input: FeedbackInput, messageId?: string): Promise<void> => ipcRenderer.invoke(PROFILE_IPC.feedback, input, messageId),
+  feedbackRetry: (): Promise<void> => ipcRenderer.invoke(PROFILE_IPC.retry),
+  onProfileChanged: (cb: () => void): (() => void) => { const listener = (): void => cb(); ipcRenderer.on(PROFILE_IPC.changed, listener); return () => ipcRenderer.removeListener(PROFILE_IPC.changed, listener) },
   planningRead: (start: string, end: string): Promise<PlanningSnapshot> => ipcRenderer.invoke(PLANNING_IPC.read, start, end),
   courseSave: (input: CourseInput): Promise<void> => ipcRenderer.invoke(PLANNING_IPC.saveCourse, input),
   courseDelete: (id: number): Promise<void> => ipcRenderer.invoke(PLANNING_IPC.deleteCourse, id),

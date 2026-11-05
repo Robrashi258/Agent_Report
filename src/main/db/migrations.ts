@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3'
+export const LATEST_SCHEMA_VERSION = 8
 
 /** 简单版本迁移：user_version 存版本号，逐版本执行 DDL */
 export function runMigrations(db: Database.Database): void {
@@ -120,6 +121,48 @@ export function runMigrations(db: Database.Database): void {
         );
       `)
       db.pragma('user_version = 7')
+    })()
+  }
+  if (version < 8) {
+    db.transaction(() => {
+      db.exec(`
+        ALTER TABLE tasks ADD COLUMN base_estimate_min INTEGER NOT NULL DEFAULT 30;
+        ALTER TABLE tasks ADD COLUMN estimate_group TEXT NOT NULL DEFAULT '';
+        ALTER TABLE tasks ADD COLUMN estimate_source TEXT NOT NULL DEFAULT 'initial';
+        ALTER TABLE tasks ADD COLUMN completion_seq INTEGER NOT NULL DEFAULT 0;
+        UPDATE tasks SET base_estimate_min=estimate_min,estimate_source='legacy';
+        CREATE TABLE memory_facts (
+          id TEXT PRIMARY KEY, scope TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
+          source TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1, expires_at TEXT, updated_at TEXT NOT NULL,
+          UNIQUE(scope,key)
+        );
+        CREATE TABLE profile_settings(id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL, calibration_enabled INTEGER NOT NULL);
+        INSERT INTO profile_settings VALUES(1,1,1);
+        CREATE TABLE completion_events (
+          id TEXT PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id), cycle INTEGER NOT NULL,
+          title TEXT NOT NULL, group_key TEXT NOT NULL, estimate_source TEXT NOT NULL,
+          base_min INTEGER NOT NULL, planned_min INTEGER NOT NULL, had_plan INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
+          valid INTEGER NOT NULL DEFAULT 1, UNIQUE(task_id,cycle)
+        );
+        CREATE TABLE completion_feedback (
+          event_id TEXT PRIMARY KEY REFERENCES completion_events(id), actual_min INTEGER,
+          difficulty TEXT NOT NULL, interrupted INTEGER NOT NULL, scope_changed INTEGER NOT NULL,
+          note TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE completion_jobs (
+          event_id TEXT PRIMARY KEY REFERENCES completion_events(id), status TEXT NOT NULL DEFAULT 'pending',
+          attempts INTEGER NOT NULL DEFAULT 0, retry_at INTEGER NOT NULL DEFAULT 0,
+          lease_until INTEGER NOT NULL DEFAULT 0, token TEXT, last_attempt_at TEXT, trace_json TEXT NOT NULL DEFAULT '[]'
+        );
+        CREATE TABLE followup_messages (
+          id TEXT PRIMARY KEY, event_id TEXT NOT NULL UNIQUE REFERENCES completion_events(id),
+          question TEXT NOT NULL, fields_json TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open',
+          is_read INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, expires_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_completion_jobs_status ON completion_jobs(status,retry_at);
+        CREATE INDEX idx_followup_state ON followup_messages(state,is_read);
+      `)
+      db.pragma('user_version = 8')
     })()
   }
 }

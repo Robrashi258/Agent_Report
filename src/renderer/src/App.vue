@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import QuickInput from './components/QuickInput.vue'
 import TaskItem from './components/TaskItem.vue'
 import TodayView from './views/TodayView.vue'
@@ -9,11 +9,15 @@ import ProjectsView from './views/ProjectsView.vue'
 import AllTasksView from './views/AllTasksView.vue'
 import StatsView from './views/StatsView.vue'
 import SettingsView from './views/SettingsView.vue'
+import MemoryView from './views/MemoryView.vue'
+import { feedbackState, startFeedbackListener } from './stores/feedback'
 
-type ViewName = 'today' | 'inbox' | 'schedule' | 'projects' | 'all' | 'stats' | 'settings'
+type ViewName = 'today' | 'inbox' | 'schedule' | 'projects' | 'all' | 'stats' | 'settings' | 'memory'
 
 const current = ref<ViewName>('today')
 const contentPane = ref<HTMLElement | null>(null)
+let offFeedback: (() => void) | undefined
+onMounted(() => { offFeedback=startFeedbackListener() }); onUnmounted(() => offFeedback?.())
 watch(current, async () => { await nextTick(); if (contentPane.value) contentPane.value.scrollTop = 0 })
 
 const navs = [
@@ -23,6 +27,7 @@ const navs = [
   { key: 'projects' as ViewName, label: '项目', icon: '🔗' },
   { key: 'all' as ViewName, label: '全部', icon: '📋' },
   { key: 'stats' as ViewName, label: '统计', icon: '📊' },
+  { key: 'memory' as ViewName, label: '个人记忆', icon: '🧩' },
   { key: 'settings' as ViewName, label: '设置', icon: '⚙️' }
 ]
 
@@ -33,7 +38,8 @@ const viewComponents = {
   projects: ProjectsView,
   all: AllTasksView,
   stats: StatsView,
-  settings: SettingsView
+  settings: SettingsView,
+  memory: MemoryView
 }
 
 const activeView = computed(() => viewComponents[current.value])
@@ -82,9 +88,10 @@ function provideToast(): void {
         >
           <span class="nav-icon">{{ n.icon }}</span>
           <span>{{ n.label }}</span>
+          <span v-if="n.key==='today' && feedbackState.unread" class="unread-badge" :aria-label="feedbackState.unread+'条未读完成回顾'">{{ feedbackState.unread }}</span>
         </button>
       </nav>
-      <div class="sidebar-footer">v0.2 α2 · 课表规划</div>
+      <div class="sidebar-footer">v0.2 α3 · 反馈与记忆</div>
     </aside>
 
     <main class="main">
@@ -101,6 +108,7 @@ function provideToast(): void {
 </template>
 
 <style scoped>
+.unread-badge{background:#d74e46;color:white;border-radius:10px;min-width:17px;padding:2px 5px;font-size:10px;text-align:center;margin-left:auto}
 .layout {
   display: flex;
   height: 100%;

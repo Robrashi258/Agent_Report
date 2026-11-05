@@ -26,4 +26,5 @@ export const AGENT_IPC = {
   confirm: 'agent:confirm', cancel: 'agent:cancel', changed: 'agent:changed'
 } as const
 import type { PlanChange } from './planning'
-export type PendingChange = PriorityChange | PlanChange
+import type { MemoryChange } from './profile'
+export type PendingChange = PriorityChange | PlanChange | MemoryChange

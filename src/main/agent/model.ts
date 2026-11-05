@@ -13,16 +13,18 @@ export interface ToolDefinition {
   function: { name: string; description: string; parameters: Record<string, unknown> }
 }
 export type ModelTransport = (
-  settings: AppSettings, messages: ModelMessage[], tools: ToolDefinition[], signal: AbortSignal
+  settings: AppSettings, messages: ModelMessage[], tools: ToolDefinition[], signal: AbortSignal, control?: { forceResponse: boolean }
 ) => Promise<ModelMessage>
 
 // 独立保留原生tool_calls消息，不改变0.1文字分析客户端的接口。
-export const requestAgentTurn: ModelTransport = async (settings, messages, tools, signal) => {
+export const requestAgentTurn: ModelTransport = async (settings, messages, tools, signal, control) => {
   const response = await fetch(`${normalizeBaseUrl(settings.aiBaseUrl)}/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${settings.aiApiKey}` },
     signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
-    body: JSON.stringify({ model: settings.aiModel, messages, tools, tool_choice: 'auto',
+    body: JSON.stringify({ model: settings.aiModel, messages,
+      tools: control?.forceResponse ? tools.filter(t => t.function.name === 'respond') : tools,
+      tool_choice: control?.forceResponse ? { type: 'function', function: { name: 'respond' } } : 'auto',
       parallel_tool_calls: false, temperature: 0.2, max_tokens: 1800 })
   })
   if (!response.ok) {

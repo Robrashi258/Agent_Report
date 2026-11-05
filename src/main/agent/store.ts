@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { getDb } from '../db/database'
-import type { AgentRun, AgentEvent, PriorityChange, RunStatus } from '@shared/agent'
+import type { AgentRun, AgentEvent, PendingChange, RunStatus } from '@shared/agent'
 import type { ModelMessage } from './model'
 
 interface RunRow { id: string; goal: string; status: RunStatus; messages_json: string; pending_json: string | null; turns: number; updated_at: string }
@@ -28,7 +28,7 @@ export function latestRun(): AgentRun | null {
 export function addEvent(id: string, kind: AgentEvent['kind'], text: string): void {
   getDb().prepare('INSERT INTO agent_events(run_id,kind,text,created_at) VALUES(?,?,?,?)').run(id, kind, text, new Date().toISOString())
 }
-export function save(id: string, messages: ModelMessage[], status: RunStatus, pending: PriorityChange | null = null): void {
+export function save(id: string, messages: ModelMessage[], status: RunStatus, pending: PendingChange | null = null): void {
   getDb().prepare('UPDATE agent_runs SET messages_json=?,status=?,pending_json=?,updated_at=? WHERE id=?')
     .run(JSON.stringify(messages), status, pending ? JSON.stringify(pending) : null, new Date().toISOString(), id)
 }

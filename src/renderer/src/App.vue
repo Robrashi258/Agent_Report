@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch, nextTick } from 'vue'
 import QuickInput from './components/QuickInput.vue'
 import TaskItem from './components/TaskItem.vue'
 import TodayView from './views/TodayView.vue'
@@ -13,6 +13,8 @@ import SettingsView from './views/SettingsView.vue'
 type ViewName = 'today' | 'inbox' | 'schedule' | 'projects' | 'all' | 'stats' | 'settings'
 
 const current = ref<ViewName>('today')
+const contentPane = ref<HTMLElement | null>(null)
+watch(current, async () => { await nextTick(); if (contentPane.value) contentPane.value.scrollTop = 0 })
 
 const navs = [
   { key: 'today' as ViewName, label: '今日', icon: '☀️' },
@@ -82,12 +84,12 @@ function provideToast(): void {
           <span>{{ n.label }}</span>
         </button>
       </nav>
-      <div class="sidebar-footer">v0.2 α · 今日助理</div>
+      <div class="sidebar-footer">v0.2 α2 · 课表规划</div>
     </aside>
 
     <main class="main">
       <QuickInput @added="handleQuickAdd" @batch-imported="handleBatchImported" />
-      <section class="content">
+      <section ref="contentPane" class="content">
         <component :is="activeView" />
       </section>
     </main>

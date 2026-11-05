@@ -1,17 +1,20 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import type { AgentRun } from '@shared/agent'
+import PlanPreviewCard from './PlanPreviewCard.vue'
 
 const run = ref<AgentRun | null>(null)
 const input = ref('')
 const busy = ref(false)
 const error = ref('')
 const messageList = ref<HTMLElement | null>(null)
+const priority = computed(() => run.value?.pending && !('type' in run.value.pending) ? run.value.pending : null)
+const plan = computed(() => run.value?.pending && 'type' in run.value.pending ? run.value.pending.preview : null)
 watch(() => run.value?.events.length, async () => {
   await nextTick()
   if (messageList.value) messageList.value.scrollTop = messageList.value.scrollHeight
 })
-const statuses = { running: '正在处理', waiting_user: '等待你的回复', awaiting_confirmation: '待确认调整', completed: '本轮结束', cancelled: '已停止', failed: '运行未完成' }
+const statuses = { running: '正在处理', waiting_user: '等待你的回复', awaiting_confirmation: '待确认方案', completed: '本轮结束', cancelled: '已停止', failed: '运行未完成' }
 const disabled = computed(() => busy.value || run.value?.status === 'running' || run.value?.status === 'awaiting_confirmation')
 let removeListener: (() => void) | undefined
 async function refresh(): Promise<void> {
@@ -67,10 +70,11 @@ onUnmounted(() => removeListener?.())
       <div v-if="run.status === 'running'" class="working">正在查看信息… <button class="small" @click="stop">停止</button></div>
     </div>
     <div v-if="run?.pending" class="proposal">
-      <strong>调整「{{ run.pending.title }}」</strong>
-      <p>重要度 {{ run.pending.before.importance }} → {{ run.pending.after.importance }}　紧急度 {{ run.pending.before.urgency }} → {{ run.pending.after.urgency }}</p>
-      <p>{{ run.pending.reason }}</p>
-      <div class="proposal-actions"><button class="primary" :disabled="busy" @click="confirm(true)">确认调整</button><button class="small" :disabled="busy" @click="confirm(false)">放弃</button></div>
+      <PlanPreviewCard v-if="plan" :preview="plan" />
+      <template v-if="priority"><strong>调整「{{ priority.title }}」</strong>
+      <p>重要度 {{ priority.before.importance }} → {{ priority.after.importance }}　紧急度 {{ priority.before.urgency }} → {{ priority.after.urgency }}</p>
+      <p>{{ priority.reason }}</p></template>
+      <div class="proposal-actions"><button class="primary" :disabled="busy" @click="confirm(true)">{{ plan ? '确认保存计划' : '确认调整' }}</button><button class="small" :disabled="busy" @click="confirm(false)">放弃</button></div>
     </div>
     <p v-if="error" role="alert" class="chat-error">{{ error }}</p>
     <form class="composer" @submit.prevent="send">

@@ -18,10 +18,12 @@ export interface AgentRun {
   goal: string
   status: RunStatus
   events: AgentEvent[]
-  pending: PriorityChange | null
+  pending: PendingChange | null
   updatedAt: string
 }
 export const AGENT_IPC = {
   start: 'agent:start', send: 'agent:send', latest: 'agent:latest', get: 'agent:get',
   confirm: 'agent:confirm', cancel: 'agent:cancel', changed: 'agent:changed'
 } as const
+import type { PlanChange } from './planning'
+export type PendingChange = PriorityChange | PlanChange

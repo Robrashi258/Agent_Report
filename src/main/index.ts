@@ -4,7 +4,6 @@ import { mkdirSync } from 'node:fs'
 import { registerIpcHandlers } from './ipc'
 import { closeDb } from './db/database'
 import { onAppStart } from './ai/analyzer'
-import { rebalanceUnscheduled } from './ai/scheduler'
 
 // win32 通知必设
 app.setAppUserModelId('com.personal.plan')
@@ -54,11 +53,7 @@ app.whenReady().then(() => {
   createWindow()
   // 启动钩子：恢复中断的收件箱分析 + 每日重评
   onAppStart()
-  // 启动兜底：库里还有未落地的范围/链条任务（如 AI 解析漏了 range）→ 自动补排
-  const r = rebalanceUnscheduled()
-  if (r.assigned > 0) {
-    console.log(`[scheduler] 启动补排 ${r.assigned} 个未落地任务，挤占后移 ${r.displaced} 个`)
-  }
+  // 第二阶段只通过试排/确认保存执行块，不在启动时改写任务日期。
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

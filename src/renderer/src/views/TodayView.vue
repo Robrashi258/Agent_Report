@@ -4,6 +4,7 @@ import { tasksStore } from '../stores/tasks'
 import { computeScore, isOverdue } from '@shared/priority'
 import TaskItem from '../components/TaskItem.vue'
 import AgentChat from '../components/AgentChat.vue'
+import TodayPlan from '../components/TodayPlan.vue'
 
 // 60s 重算：截止临近分数上升，视图自动重排
 const tick = ref(0)
@@ -45,6 +46,7 @@ const todayLabel = new Date().toLocaleDateString('zh-CN', { month: 'long', day: 
       <span class="count">{{ sortedPending.length }} 项待办 · 聚焦 {{ focusList.length }} 项</span>
     </header>
 
+    <TodayPlan />
     <AgentChat />
 
     <div v-if="overdue.length" class="overdue-zone">
@@ -55,7 +57,7 @@ const todayLabel = new Date().toLocaleDateString('zh-CN', { month: 'long', day: 
     </div>
 
     <div v-if="focusList.length" class="zone">
-      <div class="zone-title plain">今天该做的</div>
+      <div class="zone-title plain">待办优先参考 · 实际执行以当天安排为准</div>
       <div class="zone-list">
         <TaskItem v-for="t in focusList" :key="t.id" :task="t" />
       </div>

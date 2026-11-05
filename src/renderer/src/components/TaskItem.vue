@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import type { Task } from '@shared/types'
 import { computeScore } from '@shared/priority'
 import { tasksActions } from '../stores/tasks'
+import { inputDate } from '../lib/planningTime'
 
 const props = defineProps<{ task: Task }>()
 const emit = defineEmits<{ removed: [] }>()
@@ -11,25 +12,27 @@ void emit
 const done = computed(() => props.task.status === 'done')
 const score = computed(() => computeScore(props.task))
 const adjustOpen = ref(false)
-const snoozing = ref(false)
-const chainHint = ref('')
+const timingOpen = ref(false), deadlineInput = ref(''), estimateInput = ref(30), timingBusy = ref(false), timingError = ref('')
+function openTiming(): void {
+  timingOpen.value = !timingOpen.value; timingError.value = ''
+  deadlineInput.value = inputDate(props.task.deadlineAt || (!props.task.deadlineConfirmed ? props.task.legacyDueAt : null))
+  estimateInput.value = props.task.estimateMin
+}
+async function saveTiming(): Promise<void> {
+  timingBusy.value = true; timingError.value = ''
+  try {
+    if (!Number.isInteger(estimateInput.value) || estimateInput.value < 5 || estimateInput.value > 1440) throw new Error('耗时请填写5—1440分钟。')
+    await tasksActions.updateTask({ id: props.task.id, deadlineAt: deadlineInput.value ? new Date(deadlineInput.value).toISOString() : null, estimateMin: estimateInput.value })
+    timingOpen.value = false
+  } catch (e) { timingError.value = e instanceof Error ? e.message : String(e) }
+  finally { timingBusy.value = false }
+}
 
 async function setImportance(n: number): Promise<void> {
   await tasksActions.updateTask({ id: props.task.id, importance: n })
 }
 async function setUrgency(n: number): Promise<void> {
   await tasksActions.updateTask({ id: props.task.id, urgency: n })
-}
-
-async function snooze(): Promise<void> {
-  if (snoozing.value) return
-  snoozing.value = true
-  const chained = await tasksActions.snoozeTask(props.task.id)
-  if (chained > 0) {
-    chainHint.value = `已顺延 ${chained} 个后续任务`
-    setTimeout(() => (chainHint.value = ''), 2600)
-  }
-  snoozing.value = false
 }
 
 const aiStatusLabel = computed(() => {
@@ -135,7 +138,6 @@ async function remove(): Promise<void> {
         </div>
         <span class="adjust-tip">调整后立即生效并锁定（AI 不再覆盖）</span>
       </div>
-      <div v-if="chainHint" class="chain-hint">🔗 {{ chainHint }}</div>
       <div v-if="task.status === 'inbox'" class="analyzing"><span class="spinner"></span>AI 分析中…</div>
       <div v-else-if="aiStatusLabel" class="ai-note" :class="{ failed: task.aiStatus === 'failed' }">
         {{ aiStatusLabel }}
@@ -145,13 +147,23 @@ async function remove(): Promise<void> {
 
     <div class="actions">
       <button v-if="!done" class="act" @click="adjustOpen = !adjustOpen" title="手动调整重要/紧急">调级</button>
-      <button v-if="!done" class="act" @click="snooze" title="推迟到明天">推迟明天</button>
+      <button v-if="!done" class="act" @click="openTiming" title="设置真正的截止时间和预计耗时">时间设置</button>
       <button class="act danger" @click="remove" title="删除">删除</button>
     </div>
   </div>
+  <div v-if="timingOpen" class="timing-editor">
+    <p v-if="!task.deadlineConfirmed">当前日期是旧版记录或自动提取的候选，请核对：这是必须提交的期限，还是只是准备执行的日期？</p>
+    <label>截止时间（留空表示无截止）<input v-model="deadlineInput" type="datetime-local" /></label>
+    <label>预计耗时（分钟）<input v-model.number="estimateInput" type="number" min="5" max="1440" step="5" /></label>
+    <span>执行时间请在日程或今日助理中试排，修改执行安排不会修改此截止。</span>
+    <p v-if="timingError" role="alert">{{ timingError }}</p>
+    <button class="act" :disabled="timingBusy" @click="saveTiming">确认时间信息</button>
+  </div>
+  <p v-else-if="!task.deadlineConfirmed" class="time-unconfirmed">日期待确认：请打开“时间设置”，确认真实截止或留空。</p>
 </template>
 
 <style scoped>
+.timing-editor{display:flex;flex-wrap:wrap;gap:10px;align-items:end;padding:12px;background:var(--primary-light);border-radius:8px;margin:4px 0 10px}.timing-editor label{display:grid;gap:5px;font-size:12px}.timing-editor input{padding:7px;border:1px solid var(--border);border-radius:5px;background:var(--panel);color:var(--text)}.timing-editor>span,.timing-editor>p{width:100%;font-size:12px;line-height:1.6}.time-unconfirmed{font-size:12px;color:#986620;margin:0 0 10px 12px}
 .task-item {
   display: flex;
   align-items: flex-start;

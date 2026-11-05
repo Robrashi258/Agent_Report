@@ -20,7 +20,11 @@ export interface Task {
   importance: number // 1-5
   urgency: number // 1-5
   estimateMin: number // 预估耗时(分钟)
-  dueAt: string | null
+  dueAt: string | null // 兼容评分接口：仅映射已确认的deadlineAt，永不表示执行时间
+  deadlineAt: string | null
+  deadlineConfirmed: boolean
+  deadlineSource: string
+  legacyDueAt: string | null
   dueNotified: boolean
   snoozeCount: number
   aiStatus: AiStatus
@@ -50,6 +54,7 @@ export interface TaskUpdateInput {
   urgency?: number
   estimateMin?: number
   dueAt?: string | null
+  deadlineAt?: string | null
 }
 
 /** 任务查询过滤条件 */

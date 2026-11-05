@@ -26,6 +26,9 @@ interface TaskRow {
   created_at: string
   updated_at: string
   completed_at: string | null
+  deadline_at: string | null
+  deadline_confirmed: number
+  deadline_source: string
 }
 
 function rowToTask(r: TaskRow): Task {
@@ -45,7 +48,11 @@ function rowToTask(r: TaskRow): Task {
     importance: r.importance,
     urgency: r.urgency,
     estimateMin: r.estimate_min,
-    dueAt: r.due_at,
+    dueAt: r.deadline_confirmed ? r.deadline_at : null,
+    deadlineAt: r.deadline_at,
+    deadlineConfirmed: r.deadline_confirmed === 1,
+    deadlineSource: r.deadline_source,
+    legacyDueAt: r.due_at,
     dueNotified: r.due_notified === 1,
     snoozeCount: r.snooze_count,
     aiStatus: r.ai_status as AiStatus,
@@ -108,6 +115,10 @@ export function batchCreateTasks(items: BatchParsedTask[], aiStatus: AiStatus): 
         ts
       )
     })
+    // 解析日期是候选截止；范围任务的范围不等同外部截止。
+    const ids = db.prepare('SELECT id FROM tasks WHERE project_id=? ORDER BY chain_order').all(projectId) as { id: number }[]
+    ids.forEach((row, i) => db.prepare('UPDATE tasks SET deadline_at=?,deadline_confirmed=?,deadline_source=? WHERE id=?')
+      .run(rows[i].dueAt, rows[i].dueAt ? 0 : 1, rows[i].dueAt ? 'parsed' : 'none', row.id))
   })
   tx(items)
   return items.length
@@ -118,8 +129,13 @@ export function applyAnalysis(id: number, result: AiAnalysisResult, aiStatus: Ai
   const db = getDb()
   db.prepare(
     `UPDATE tasks SET
-       importance = ?, urgency = ?, category = ?, tags = ?, estimate_min = ?, due_at = ?, summary = ?,
-       status = 'pending', ai_status = ?, updated_at = ?
+       importance = ?, urgency = ?, category = ?, tags = ?,
+       estimate_min = CASE WHEN EXISTS(SELECT 1 FROM plan_blocks WHERE task_id=tasks.id) THEN estimate_min ELSE ? END,
+       due_at = COALESCE(due_at, ?), summary = ?,
+       status = 'pending', ai_status = ?, updated_at = ?,
+       deadline_at = CASE WHEN deadline_source='user' OR EXISTS(SELECT 1 FROM plan_blocks WHERE task_id=tasks.id) THEN deadline_at ELSE ? END,
+       deadline_confirmed = CASE WHEN deadline_source='user' OR EXISTS(SELECT 1 FROM plan_blocks WHERE task_id=tasks.id) THEN deadline_confirmed ELSE ? END,
+       deadline_source = CASE WHEN deadline_source='user' OR EXISTS(SELECT 1 FROM plan_blocks WHERE task_id=tasks.id) THEN deadline_source ELSE ? END
      WHERE id = ? AND status = 'inbox'`
   ).run(
     result.importance,
@@ -130,7 +146,7 @@ export function applyAnalysis(id: number, result: AiAnalysisResult, aiStatus: Ai
     result.dueAt,
     result.summary,
     aiStatus,
-    now(),
+    now(), result.dueAt, result.dueAt ? 0 : 1, result.dueAt ? 'parsed' : 'none',
     id
   )
 }
@@ -240,6 +256,7 @@ export function addChainStep(projectId: string, content: string, dueAt: string |
   // 组内所有任务的 chain_total +1
   db.prepare(`UPDATE tasks SET chain_total = ? WHERE project_id = ?`).run(info.total + 1, projectId)
   const inserted = db.prepare(`SELECT MAX(id) AS id FROM tasks WHERE project_id = ?`).get(projectId) as { id: number }
+  if (dueAt) updateTask({ id: inserted.id, deadlineAt: dueAt })
   return getTaskById(inserted.id)
 }
 
@@ -296,12 +313,19 @@ export function updateTask(input: TaskUpdateInput, source: 'user' | 'review' = '
     if (source === 'user') sets.push('manual_locked = 1')
   }
   if (input.estimateMin !== undefined) {
+    if (!Number.isInteger(input.estimateMin) || input.estimateMin < 5 || input.estimateMin > 1440) throw new Error('预计耗时必须是5—1440分钟的整数。')
+    const planned = db.prepare('SELECT start_at,end_at FROM plan_blocks WHERE task_id=?').get(input.id) as { start_at: number; end_at: number } | undefined
+    if (planned && input.estimateMin * 60000 > planned.end_at - planned.start_at) throw new Error('新耗时超过现有执行块，请先在日程移除该安排再修改。')
     sets.push('estimate_min = ?')
     params.push(Math.max(5, Math.round(input.estimateMin)))
   }
-  if (input.dueAt !== undefined) {
-    sets.push('due_at = ?')
-    params.push(input.dueAt)
+  const deadline = input.deadlineAt !== undefined ? input.deadlineAt : input.dueAt
+  if (deadline !== undefined) {
+    if (deadline !== null && (typeof deadline !== 'string' || !Number.isFinite(new Date(deadline).getTime()))) throw new Error('截止时间无效。')
+    const planned = db.prepare('SELECT end_at FROM plan_blocks WHERE task_id=?').get(input.id) as { end_at: number } | undefined
+    if (deadline && planned && planned.end_at > new Date(deadline).getTime()) throw new Error('现有执行安排晚于新截止，请先移除或重排执行时间。')
+    sets.push('deadline_at = ?', 'deadline_confirmed = 1', "deadline_source = 'user'")
+    params.push(deadline === null ? null : new Date(deadline).toISOString())
     // 截止时间变化 → 重置通知标记，可再次提醒
     sets.push('due_notified = 0')
   }
@@ -332,40 +356,7 @@ export function completeTask(id: number, done: boolean): Task | null {
 
 /** 推迟到明天：due_at = 明天（保持时间部分），无截止则明天 23:59；snooze_count+1 */
 export function snoozeTask(id: number): { task: Task; chained: number } | null {
-  const db = getDb()
-  const existing = getTaskById(id)
-  if (!existing) return null
-
-  const tomorrow = new Date()
-  tomorrow.setDate(tomorrow.getDate() + 1)
-  let newDue: Date
-  if (existing.dueAt) {
-    const due = new Date(existing.dueAt)
-    // 若截止已过，以明天同时刻推；否则把日期挪到明天、保留原时刻
-    due.setDate(tomorrow.getDate())
-    due.setMonth(tomorrow.getMonth())
-    due.setFullYear(tomorrow.getFullYear())
-    newDue = due
-  } else {
-    tomorrow.setHours(23, 59, 0, 0)
-    newDue = tomorrow
-  }
-
-  const stmt = db.prepare(
-    `UPDATE tasks SET due_at = ?, snooze_count = snooze_count + 1, due_notified = 0, updated_at = ? WHERE id = ?`
-  )
-  // 统一 toLocalIso（无 Z 后缀）：与批量导入/调度器写库格式一致，SQL 字符串比较才可靠
-  stmt.run(toLocalIso(newDue), now(), id)
-
-  // 项目链条：推迟上游环节 → 下游环节保持先后错开整体顺移
-  let chained = 0
-  if (existing.projectId) {
-    const anchor = new Date(newDue)
-    anchor.setDate(anchor.getDate() + 1)
-    chained = cascadeChainAfter(existing.projectId, existing.chainOrder, anchor)
-  }
-
-  return { task: getTaskById(id)!, chained }
+  throw new Error('旧按天推迟已停用，请在今日助理试排明天的执行时段；截止时间不会随之改变。')
 }
 
 /**

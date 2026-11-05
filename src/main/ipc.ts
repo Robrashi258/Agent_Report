@@ -6,11 +6,12 @@ import { getSettings, setSettings } from './db/settingsDao'
 import { enqueueAnalyze, retryAnalyze, setBroadcastFn } from './ai/analyzer'
 import { testConnection, isAiConfigured } from './ai/client'
 import { aiBatchParse, ruleBatchParse } from './ai/batch'
-import { rebalanceUnscheduled, rebalanceProject } from './ai/scheduler'
 import type { RebalanceResult } from '@shared/types'
 import { AGENT_IPC } from '@shared/agent'
 import * as agent from './agent/runner'
 import * as agentStore from './agent/store'
+import { PLANNING_IPC } from '@shared/planning'
+import * as planning from './planning/service'
 
 /** 广播任务变化（分析完成/手机端操作后刷新所有视图） */
 export function broadcastTaskChanged(win: BrowserWindow | null): void {
@@ -20,6 +21,15 @@ export function broadcastTaskChanged(win: BrowserWindow | null): void {
 }
 
 export function registerIpcHandlers(getWin: () => BrowserWindow | null): void {
+  const changed = (): void => broadcastTaskChanged(getWin())
+  ipcMain.handle(PLANNING_IPC.read, (_e, start: string, end: string) => planning.snapshot(start, end))
+  ipcMain.handle(PLANNING_IPC.saveCourse, (_e, input) => { planning.saveCourse(input); changed() })
+  ipcMain.handle(PLANNING_IPC.deleteCourse, (_e, id: number) => { planning.deleteCourse(id); changed() })
+  ipcMain.handle(PLANNING_IPC.settings, (_e, input) => { planning.saveSettings(input); changed() })
+  ipcMain.handle(PLANNING_IPC.preview, (_e, ids: number[], start: string, end: string) => planning.preview(ids, start, end))
+  ipcMain.handle(PLANNING_IPC.commit, (_e, id: string) => { const result = planning.commit(id, null); changed(); return result })
+  ipcMain.handle(PLANNING_IPC.lock, (_e, id: number, locked: boolean) => { planning.lockBlock(id, locked); changed() })
+  ipcMain.handle(PLANNING_IPC.remove, (_e, id: number) => { planning.removeBlock(id); changed() })
   setBroadcastFn(() => broadcastTaskChanged(getWin()))
   agentStore.recoverInterruptedRuns()
   agent.setAgentNotify(() => {
@@ -98,13 +108,13 @@ export function registerIpcHandlers(getWin: () => BrowserWindow | null): void {
       throw new Error('没有解析出任何任务，请检查粘贴的内容')
     }
     const created = taskDao.batchCreateTasks(items, mode === 'ai' ? 'ok' : 'none')
-    // 范围任务智能分配到范围内各天（均衡 + 紧急前压 + 超载后排已有任务）
-    const { assigned } = rebalanceUnscheduled()
+    // 导入只建立任务，执行安排由新版试排及用户确认保存。
+    const assigned = 0
     broadcastTaskChanged(getWin())
     return { created, mode, rebalanced: assigned }
   })
 
-  ipcMain.handle(IPC.scheduleRebalance, (): RebalanceResult => rebalanceUnscheduled())
+  ipcMain.handle(IPC.scheduleRebalance, (): RebalanceResult => { throw new Error('旧按天分配已停用，请在今日助理或日程中试排。') })
 
   ipcMain.handle(IPC.projectList, (): taskDao.ProjectGroup[] => taskDao.listProjects())
 
@@ -132,9 +142,7 @@ export function registerIpcHandlers(getWin: () => BrowserWindow | null): void {
   })
 
   ipcMain.handle(IPC.chainShift, (_e, projectId: string, days: number): number => {
-    const moved = taskDao.shiftChain(projectId, days)
-    broadcastTaskChanged(getWin())
-    return moved
+    throw new Error('旧链条日期平移已停用；请通过新的试排移动执行时间。')
   })
 
   ipcMain.handle(IPC.chainRemoveTask, (_e, id: number): boolean => {
@@ -144,9 +152,7 @@ export function registerIpcHandlers(getWin: () => BrowserWindow | null): void {
   })
 
   ipcMain.handle(IPC.projectRebalance, (_e, projectId: string): RebalanceResult => {
-    const result = rebalanceProject(projectId)
-    broadcastTaskChanged(getWin())
-    return result
+    throw new Error('请在今日助理查询此项目任务，再试排具体执行时间。')
   })
 
   ipcMain.handle(IPC.settingsGet, (): AppSettings => getSettings())

@@ -111,12 +111,7 @@ const pct = (done: number, total: number): number => (total === 0 ? 0 : Math.rou
             </div>
             <span class="pct">{{ pct(p.doneCount, p.total) }}%</span>
           </div>
-          <button
-            v-if="hasRange(p)"
-            class="rebalance-btn"
-            title="范围内任务重新均衡分配（考虑每天已有任务量，紧急的排前面）"
-            @click.stop="rebalance(p.projectId)"
-          >重新分配</button>
+          <span v-if="hasRange(p)" class="pc-meta">在今日助理中试排执行时间</span>
           <span class="chevron" :class="{ open: expanded.has(p.projectId) }">▾</span>
         </header>
 

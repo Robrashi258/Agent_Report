@@ -1,13 +1,24 @@
 import * as tasks from '../db/taskDao'
 import { getDb } from '../db/database'
-import type { PriorityChange } from '@shared/agent'
+import type { PriorityChange, PendingChange } from '@shared/agent'
+import * as planning from '../planning/service'
 import type { Task } from '@shared/types'
 import type { ToolDefinition } from './model'
 import { createHash } from 'node:crypto'
 
-type Field = { type: 'string' | 'integer'; description?: string; enum?: string[]; minimum?: number; maximum?: number; maxLength?: number }
+type Field = { type: 'string' | 'integer' | 'array'; description?: string; enum?: string[]; minimum?: number; maximum?: number; maxLength?: number; items?: object; minItems?: number; maxItems?: number }
 interface Spec { name: string; description: string; fields: Record<string, Field>; required: string[] }
 const specs: Spec[] = [
+  { name: 'respond', description: '结构化回复：模型自行选择mode=question等待用户回答，或mode=answer结束本轮。text为给用户的简短内容，不能声称未提交的操作已保存。', fields: {
+    mode: { type: 'string', enum: ['question', 'answer'] }, text: { type: 'string', maxLength: 3000 }
+  }, required: ['mode', 'text'] },
+  { name: 'get_calendar', description: '读取最多7天的课程、可安排时间窗口、每日上限和已有执行计划。日期格式YYYY-MM-DD。', fields: { startDate: { type: 'string', maxLength: 10 }, endDate: { type: 'string', maxLength: 10 } }, required: ['startDate', 'endDate'] },
+  { name: 'get_free_slots', description: '计算日期范围内避开课程、已有安排和休息后的空档及每日剩余容量；空档不是已保存安排。', fields: { startDate: { type: 'string', maxLength: 10 }, endDate: { type: 'string', maxLength: 10 } }, required: ['startDate', 'endDate'] },
+  { name: 'preview_plan', description: '为指定的真实未完成任务试排连续执行时段，避开课程和其他任务、不超过已确认截止。可移动所选任务尚未开始且未锁定的安排。返回试排ID、安排、未安排原因；不会写正式计划。先查询任务ID。', fields: {
+    taskIds: { type: 'array', items: { type: 'integer', minimum: 1 }, minItems: 1, maxItems: 20 }, startDate: { type: 'string', maxLength: 10 }, endDate: { type: 'string', maxLength: 10 },
+    dailyStartMin: { type: 'integer', minimum: 0, maximum: 1439, description: '可选，每天候选开始下界，午夜起分钟；下午可设720或更晚。' }, dailyEndMin: { type: 'integer', minimum: 1, maximum: 1440, description: '可选，每天候选结束上界。' }
+  }, required: ['taskIds', 'startDate', 'endDate'] },
+  { name: 'propose_plan', description: '将本次对话的试排结果交给用户确认。必须引用preview_plan返回的previewId；无可行块不能提交。存在未安排任务时说明部分成功，不得说全部安排。', fields: { previewId: { type: 'string', maxLength: 100 } }, required: ['previewId'] },
   { name: 'list_tasks', description: '查询任务。按关键词和状态筛选，返回真实字段及updatedAt；不会修改数据。',
     fields: { query: { type: 'string', maxLength: 100 }, status: { type: 'string', enum: ['active', 'done', 'all'] }, limit: { type: 'integer', minimum: 1, maximum: 20 } }, required: [] },
   { name: 'get_task', description: '按ID读取一条任务最新状态。提出调级前必须先读取；归档任务不可修改。',
@@ -25,15 +36,27 @@ export const toolDefinitions: ToolDefinition[] = specs.map(s => ({ type: 'functi
   parameters: { type: 'object', properties: s.fields, required: s.required, additionalProperties: false }
 } }))
 
-export interface ToolContext { observed: Map<number, string> }
+export interface ToolContext { observed: Map<number, string>; runId?: string }
 export interface ToolResult {
   ok: boolean; data?: unknown; errorCode?: string; message?: string
-  pause?: 'waiting_user' | 'awaiting_confirmation' | 'completed'; pending?: PriorityChange
+  pause?: 'waiting_user' | 'awaiting_confirmation' | 'completed'; pending?: PendingChange
 }
 function fail(errorCode: string, message: string): ToolResult { return { ok: false, errorCode, message } }
+function readableTimes(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(readableTimes)
+  if (!value || typeof value !== 'object') return value
+  const obj = value as Record<string, unknown>, result = Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, readableTimes(v)]))
+  if (typeof obj.start === 'number' && typeof obj.end === 'number') {
+    result.startLocal = new Date(obj.start).toLocaleString('sv-SE')
+    result.endLocal = new Date(obj.end).toLocaleString('sv-SE')
+  }
+  return result
+}
 function view(t: Task): object {
   return { id: t.id, content: t.content.slice(0, 400), summary: t.summary, status: t.status, importance: t.importance,
-    urgency: t.urgency, dueAt: t.dueAt, estimateMin: t.estimateMin, manualLocked: t.manualLocked, updatedAt: t.updatedAt }
+    urgency: t.urgency, deadlineAt: t.deadlineAt, deadlineLocal: t.deadlineAt ? new Date(t.deadlineAt).toLocaleString('sv-SE') : null,
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, deadlineConfirmed: t.deadlineConfirmed, deadlineSource: t.deadlineSource,
+    legacyDueAt: t.legacyDueAt, estimateMin: t.estimateMin, manualLocked: t.manualLocked, updatedAt: t.updatedAt }
 }
 export function executeTool(name: string, raw: string, context: ToolContext): ToolResult {
   const spec = specs.find(s => s.name === name)
@@ -46,8 +69,26 @@ export function executeTool(name: string, raw: string, context: ToolContext): To
     const field = spec.fields[key]
     if (field.type === 'string' && (typeof value !== 'string' || value.length > (field.maxLength ?? 500) || (field.enum && !field.enum.includes(value)))) return fail('INVALID_ARGUMENTS', `${key}不是允许的字符串。`)
     if (field.type === 'integer' && (typeof value !== 'number' || !Number.isSafeInteger(value) || value < (field.minimum ?? 0) || value > (field.maximum ?? Number.MAX_SAFE_INTEGER))) return fail('INVALID_ARGUMENTS', `${key}不是范围内整数。`)
+    if (field.type === 'array' && (!Array.isArray(value) || value.length < 1 || value.length > 20 || value.some(v => !Number.isSafeInteger(v) || v < 1) || new Set(value).size !== value.length)) return fail('INVALID_ARGUMENTS', `${key}必须是1—20个不同的任务编号。`)
     if (spec.required.includes(key) && typeof value === 'string' && !value.trim()) return fail('INVALID_ARGUMENTS', `${key}不能为空。`)
   }
+  try {
+    if (name === 'get_calendar') return { ok: true, data: readableTimes(planning.snapshot(String(args.startDate), String(args.endDate))) }
+    if (name === 'get_free_slots') return { ok: true, data: readableTimes(planning.getFree(String(args.startDate), String(args.endDate))) }
+    if (name === 'preview_plan') {
+      if (!context.runId) return fail('INVALID_CONTEXT', '缺少当前对话。')
+      if ((args.taskIds as number[]).some(id => !context.observed.has(id))) return fail('READ_REQUIRED', '请先查询本次运行中所需的任务。')
+      const result = planning.preview(args.taskIds as number[], String(args.startDate), String(args.endDate), context.runId, Date.now(), { startMin: args.dailyStartMin as number | undefined, endMin: args.dailyEndMin as number | undefined })
+      return { ok: true, data: readableTimes({ ...result, previewId: result.id, saved: false }) }
+    }
+    if (name === 'propose_plan') {
+      if (!context.runId) return fail('INVALID_CONTEXT', '缺少当前对话。')
+      const p = planning.loadPreview(String(args.previewId), context.runId)
+      if (!p.blocks.length) return fail('NO_FEASIBLE_PLAN', '没有可行安排，请读取未安排原因，必要时询问用户。')
+      if (planning.snapshot(p.startDate, p.endDate).version !== p.version) return fail('VERSION_CONFLICT', '计划或课表已变化，请重新试排。')
+      return { ok: true, data: { preview: p, saved: false }, pause: 'awaiting_confirmation', pending: { type: 'plan', preview: p } }
+    }
+  } catch (e) { return fail('PLANNING_ERROR', e instanceof Error ? e.message : '规划工具执行失败。') }
   if (name === 'list_tasks') {
     const list = tasks.listTasks(args.status === 'all' ? {} : { status: args.status === 'done' ? 'done' : 'active' })
       .filter(t => !args.query || `${t.content} ${t.summary ?? ''}`.toLocaleLowerCase().includes(String(args.query).toLocaleLowerCase()))
@@ -57,6 +98,7 @@ export function executeTool(name: string, raw: string, context: ToolContext): To
   }
   if (name === 'ask_user') return { ok: true, data: { question: args.question }, pause: 'waiting_user' }
   if (name === 'finish_reply') return { ok: true, data: { text: args.text }, pause: 'completed' }
+  if (name === 'respond') return { ok: true, data: args.mode === 'question' ? { question: args.text } : { text: args.text }, pause: args.mode === 'question' ? 'waiting_user' : 'completed' }
   const task = tasks.getTaskById(Number(args.taskId))
   if (!task || task.status === 'archived') return fail('NOT_FOUND', '该任务不存在或已归档。')
   if (name === 'get_task') { context.observed.set(task.id, task.updatedAt); return { ok: true, data: view(task) } }

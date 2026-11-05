@@ -88,4 +88,38 @@ export function runMigrations(db: Database.Database): void {
       db.pragma('user_version = 6')
     })()
   }
+  if (version < 7) {
+    db.transaction(() => {
+      db.exec(`
+        ALTER TABLE tasks ADD COLUMN deadline_at TEXT;
+        ALTER TABLE tasks ADD COLUMN deadline_confirmed INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE tasks ADD COLUMN deadline_source TEXT NOT NULL DEFAULT 'none';
+        UPDATE tasks SET deadline_confirmed=0,deadline_source='legacy_unconfirmed' WHERE due_at IS NOT NULL;
+        CREATE TABLE calendar_courses (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+          weekday INTEGER NOT NULL CHECK(weekday BETWEEN 1 AND 7),
+          start_min INTEGER NOT NULL, end_min INTEGER NOT NULL,
+          from_date TEXT NOT NULL, to_date TEXT NOT NULL,
+          CHECK(start_min>=0 AND end_min<=1440 AND start_min<end_min), CHECK(from_date<=to_date)
+        );
+        CREATE TABLE planning_settings (
+          id INTEGER PRIMARY KEY CHECK(id=1), start_min INTEGER NOT NULL, end_min INTEGER NOT NULL,
+          daily_max_min INTEGER NOT NULL, break_min INTEGER NOT NULL
+        );
+        INSERT INTO planning_settings VALUES(1,480,1320,240,10);
+        CREATE TABLE plan_blocks (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL REFERENCES tasks(id),
+          start_at INTEGER NOT NULL, end_at INTEGER NOT NULL, locked INTEGER NOT NULL DEFAULT 0,
+          reason TEXT NOT NULL, created_at TEXT NOT NULL, CHECK(start_at<end_at), UNIQUE(task_id)
+        );
+        CREATE TABLE plan_previews (
+          id TEXT PRIMARY KEY, run_id TEXT, json TEXT NOT NULL, committed_json TEXT, created_at TEXT NOT NULL
+        );
+        CREATE TABLE planning_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT NOT NULL, data_json TEXT NOT NULL, created_at TEXT NOT NULL
+        );
+      `)
+      db.pragma('user_version = 7')
+    })()
+  }
 }

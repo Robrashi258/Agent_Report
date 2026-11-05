@@ -13,6 +13,9 @@ import { executeTool } from '../src/main/agent/tools'
 import { computeScore, isOverdue } from '../src/shared/priority'
 import { extractDueDate } from '../src/main/ai/rules'
 import type { ModelMessage, ModelTransport } from '../src/main/agent/model'
+import { planningTests } from './planning.test'
+import * as planning from '../src/main/planning/service'
+import { dateKey, at } from '../src/main/planning/engine'
 
 app.setPath('userData', mkdtempSync(join(tmpdir(), 'suishou-agent-tests-')))
 let passed = 0
@@ -35,7 +38,7 @@ app.whenReady().then(async () => {
   try {
     setSettings(configured)
     const taskId = seed('测试报告'), otherId = seed('另一份报告')
-    await test('迁移至v6且重复执行不破坏数据', () => { runMigrations(getDb()); assert.equal(getDb().pragma('user_version', { simple: true }), 6); assert.ok(tasks.getTaskById(taskId)) })
+    await test('迁移至v7且重复执行不破坏数据', () => { runMigrations(getDb()); assert.equal(getDb().pragma('user_version', { simple: true }), 7); assert.ok(tasks.getTaskById(taskId)) })
     await test('带截止的过期判定不抛异常', () => { assert.equal(isOverdue({ dueAt: '2026-01-01T12:00:00' }, new Date('2026-01-02').getTime()), true); assert.equal(isOverdue({ dueAt: null }), false); assert.ok(Number.isFinite(computeScore(tasks.getTaskById(taskId)!))) })
     await test('明天下午与分钟日期解析', () => { const now = new Date(2026, 10, 5, 10); assert.equal(extractDueDate('明天下午3:30交报告', now), '2026-11-06T15:30:00'); assert.equal(extractDueDate('明天27:00', now), null) })
     await test('自动重评不锁定、人工修改锁定', () => { tasks.updateTask({ id: taskId, importance: 4 }, 'review'); assert.equal(tasks.getTaskById(taskId)!.manualLocked, false); tasks.updateTask({ id: otherId, importance: 4 }); assert.equal(tasks.getTaskById(otherId)!.manualLocked, true) })
@@ -141,10 +144,11 @@ app.whenReady().then(async () => {
     })
     await test('普通文本结束会要求模型纠正为结构化等待动作', async () => {
       const run = create(); let round = 0
-      await drive(run, async (_s, messages) => {
+      await drive(run, async (_s, messages, _tools, _signal, control) => {
         if (round++ === 0) return { role: 'assistant', content: '你指哪一个任务？' }
         assert.equal(messages.at(-1)!.role, 'system')
-        return call('ask_user', { question: '你指哪一个任务？' })
+        assert.equal(control?.forceResponse, true)
+        return call('respond', { mode: 'question', text: '你指哪一个任务？' })
       })
       assert.equal(store.getRun(run).status, 'waiting_user')
     })
@@ -158,6 +162,7 @@ app.whenReady().then(async () => {
       const run = create('恢复测试'); store.save(run, [{ role: 'system', content: '' }, { role: 'user', content: '恢复测试' }, call('get_task', { taskId })], 'running')
       store.recoverInterruptedRuns(); assert.equal(store.getRun(run).status, 'failed'); assert.equal(JSON.parse(store.row(run).messages_json).length, 2)
     })
+    await planningTests(test)
     if (process.argv.includes('--live')) {
       const keyFile = process.env.AGENT_TEST_KEY_FILE
       if (!keyFile) throw new Error('真实验证需要AGENT_TEST_KEY_FILE。')
@@ -176,7 +181,7 @@ app.whenReady().then(async () => {
         const previous = tasks.getTaskById(taskId)!.urgency
         const run = create('把“测试报告”的紧急度改成5。')
         await drive(run)
-        assert.equal(store.getRun(run).status, 'awaiting_confirmation')
+        assert.equal(store.getRun(run).status, 'awaiting_confirmation', JSON.stringify(store.getRun(run).events))
         assert.equal(tasks.getTaskById(taskId)!.urgency, previous)
         assert.equal(store.getRun(run).pending!.taskId, taskId)
         confirmChange(run, true)
@@ -186,7 +191,40 @@ app.whenReady().then(async () => {
         const run = create('把报告的优先级提高一些。')
         await drive(run)
         assert.equal(store.getRun(run).status, 'waiting_user', JSON.stringify(store.getRun(run).events))
-        assert.ok(store.getRun(run).events.some(e => e.kind === 'tool' && e.text.includes('ask_user')))
+        assert.ok(store.getRun(run).events.some(e => e.kind === 'tool' && (e.text.includes('ask_user') || e.text.includes('respond'))))
+      })
+      await test('真实千问按明日下午课表试排，确认后写执行块且不改截止', async () => {
+        const tomorrow = dateKey(Date.now() + 86400000)
+        planning.saveSettings({ startMin: 480, endMin: 1320, dailyMaxMin: 240, breakMin: 10 })
+        planning.saveCourse({ name: '演示课', weekday: new Date(`${tomorrow}T12:00:00`).getDay() || 7, startMin: 720, endMin: 840, fromDate: tomorrow, toDate: tomorrow })
+        const deadline = new Date(at(tomorrow, 1080)).toISOString()
+        tasks.updateTask({ id: taskId, deadlineAt: deadline })
+        const run = create('把“测试报告”安排到明天下午，避开课表，给我计划草案确认。')
+        await drive(run)
+        const result = store.getRun(run)
+        assert.equal(result.status, 'awaiting_confirmation', JSON.stringify(result.events))
+        assert.ok(result.pending && 'type' in result.pending)
+        if (!result.pending || !('type' in result.pending)) throw new Error('缺少计划草案')
+        assert.equal(result.pending.preview.blocks.length, 1)
+        assert.equal(result.pending.preview.blocks[0].taskId, taskId)
+        assert.ok(result.pending.preview.blocks[0].start >= at(tomorrow, 840))
+        assert.ok(result.pending.preview.blocks[0].end <= at(tomorrow, 1080))
+        assert.equal(planning.listBlocks().length, 0)
+        assert.equal(confirmChange(run, true).status, 'completed')
+        assert.equal(planning.listBlocks().length, 1)
+        assert.equal(tasks.getTaskById(taskId)!.deadlineAt, deadline)
+      })
+      await test('真实千问读取不可行试排反馈，不伪造安排或修改截止', async () => {
+        const tomorrow = dateKey(Date.now() + 86400000), id = seed('不可行演示任务')
+        const deadline = new Date(at(tomorrow, 735)).toISOString()
+        tasks.updateTask({ id, deadlineAt: deadline })
+        const run = create('把“不可行演示任务”安排到明天下午，截止时间不能更改。请实际试排；放不下就说明原因，不要提交计划。')
+        await drive(run)
+        const result = store.getRun(run)
+        assert.ok(['completed', 'waiting_user'].includes(result.status), JSON.stringify(result.events))
+        assert.ok(result.events.some(e => e.kind === 'tool' && e.text.includes('preview_plan') && e.text.includes('unscheduled')))
+        assert.equal(result.pending, null); assert.equal(planning.listBlocks().some(b => b.taskId === id), false)
+        assert.equal(tasks.getTaskById(id)!.deadlineAt, deadline)
       })
       // 测试库退出后清空密钥，日志从不打印凭据。
       setSettings({ aiApiKey: '' })

@@ -11,10 +11,14 @@ import StatsView from './views/StatsView.vue'
 import SettingsView from './views/SettingsView.vue'
 import MemoryView from './views/MemoryView.vue'
 import { feedbackState, startFeedbackListener } from './stores/feedback'
+import { openAgentRun, agentNavigation } from './stores/agentNavigation'
+import type {AgentRun} from '@shared/agent'
 
 type ViewName = 'today' | 'inbox' | 'schedule' | 'projects' | 'all' | 'stats' | 'settings' | 'memory'
 
 const current = ref<ViewName>('today')
+let lastOpenedRun:string|null=null
+watch(()=>agentNavigation.revision,async()=>{current.value='today';if(lastOpenedRun!==agentNavigation.runId){lastOpenedRun=agentNavigation.runId;await nextTick();if(contentPane.value)contentPane.value.scrollTop=0}})
 const contentPane = ref<HTMLElement | null>(null)
 let offFeedback: (() => void) | undefined
 onMounted(() => { offFeedback=startFeedbackListener() }); onUnmounted(() => offFeedback?.())
@@ -22,7 +26,7 @@ watch(current, async () => { await nextTick(); if (contentPane.value) contentPan
 
 const navs = [
   { key: 'today' as ViewName, label: '今日', icon: '☀️' },
-  { key: 'inbox' as ViewName, label: '收件箱', icon: '📥' },
+  { key: 'inbox' as ViewName, label: '待确认', icon: '📥' },
   { key: 'schedule' as ViewName, label: '日程', icon: '🗓️' },
   { key: 'projects' as ViewName, label: '项目', icon: '🔗' },
   { key: 'all' as ViewName, label: '全部', icon: '📋' },
@@ -58,15 +62,9 @@ function showToast(text: string): void {
 function handleQuickAdd(content: string): void {
   const inboxRouted = current.value === 'inbox'
   if (!inboxRouted) current.value = 'today'
-  showToast('已收进收件箱')
+  showToast('已快速记录')
 }
-
-function handleBatchImported(count: number, mode: 'ai' | 'rule', rebalanced = 0): void {
-  current.value = 'today'
-  let msg = mode === 'ai' ? `AI 解析完成：${count} 条任务已导入` : `已按行拆分导入 ${count} 条任务`
-  if (rebalanced > 0) msg += `，其中 ${rebalanced} 条范围任务已自动分配到各天`
-  showToast(msg)
-}
+function handleOpened(run:AgentRun):void{openAgentRun(run.id);current.value='today';showToast('已打开事项整理，确认前不会创建任务')}
 
 provideToast()
 function provideToast(): void {
@@ -91,11 +89,11 @@ function provideToast(): void {
           <span v-if="n.key==='today' && feedbackState.unread" class="unread-badge" :aria-label="feedbackState.unread+'条未读完成回顾'">{{ feedbackState.unread }}</span>
         </button>
       </nav>
-      <div class="sidebar-footer">v0.2 α3 · 反馈与记忆</div>
+      <div class="sidebar-footer">v0.2 α4 · 事项草案</div>
     </aside>
 
     <main class="main">
-      <QuickInput @added="handleQuickAdd" @batch-imported="handleBatchImported" />
+      <QuickInput @added="handleQuickAdd" @opened="handleOpened" />
       <section ref="contentPane" class="content">
         <component :is="activeView" />
       </section>

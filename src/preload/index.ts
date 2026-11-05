@@ -1,10 +1,20 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC, type AppSettings, type Task, type TaskCreateInput, type TaskFilter, type TaskUpdateInput, type BatchCreateResult, type ChainGroup, type RebalanceResult } from '../shared/types'
-import { AGENT_IPC, type AgentRun } from '../shared/agent'
+import { AGENT_IPC, type AgentRun, type RunSummary } from '../shared/agent'
+import { DRAFT_IPC, type TaskDraft, type DraftItem } from '../shared/drafts'
 import { PLANNING_IPC, type PlanningSnapshot, type CourseInput, type PlanningSettings, type PlanPreview } from '../shared/planning'
 import { PROFILE_IPC, type MemoryFact, type MemoryInput, type DurationEstimate, type ProfileState, type CompletionDetail, type FeedbackInput } from '../shared/profile'
 
 const api = {
+  captureStart: (goal:string):Promise<AgentRun>=>ipcRenderer.invoke(DRAFT_IPC.capture,goal),
+  batchPreview: (raw:string):Promise<AgentRun>=>ipcRenderer.invoke(DRAFT_IPC.batch,raw),
+  draftGet: (id:string):Promise<TaskDraft>=>ipcRenderer.invoke(DRAFT_IPC.get,id),
+  draftSave: (id:string,version:number,items:DraftItem[]):Promise<TaskDraft>=>ipcRenderer.invoke(DRAFT_IPC.save,id,version,items),
+  draftAdd: (id:string,version:number,content:string):Promise<TaskDraft>=>ipcRenderer.invoke(DRAFT_IPC.add,id,version,content),
+  draftContinuePlan: (id:string):Promise<AgentRun>=>ipcRenderer.invoke(DRAFT_IPC.continuePlan,id),
+  mockReviewStart: ():Promise<AgentRun>=>ipcRenderer.invoke(DRAFT_IPC.mockReview),
+  draftConfirm: (id:string,version:number,accepted:boolean):Promise<AgentRun>=>ipcRenderer.invoke(DRAFT_IPC.confirm,id,version,accepted),
+  agentHistory: ():Promise<RunSummary[]>=>ipcRenderer.invoke(AGENT_IPC.history),
   memoryList: (): Promise<MemoryFact[]> => ipcRenderer.invoke(PROFILE_IPC.memoryList),
   memorySave: (input: MemoryInput, version: number | null): Promise<MemoryFact> => ipcRenderer.invoke(PROFILE_IPC.memorySave, input, version),
   memoryRemove: (id: string, version: number): Promise<void> => ipcRenderer.invoke(PROFILE_IPC.memoryRemove, id, version),
@@ -30,7 +40,7 @@ const api = {
   agentSend: (id: string, text: string): Promise<AgentRun> => ipcRenderer.invoke(AGENT_IPC.send, id, text),
   agentLatest: (): Promise<AgentRun | null> => ipcRenderer.invoke(AGENT_IPC.latest),
   agentGet: (id: string): Promise<AgentRun> => ipcRenderer.invoke(AGENT_IPC.get, id),
-  agentConfirm: (id: string, accepted: boolean): Promise<AgentRun> => ipcRenderer.invoke(AGENT_IPC.confirm, id, accepted),
+  agentConfirm: (id: string, accepted: boolean, version?:number): Promise<AgentRun> => ipcRenderer.invoke(AGENT_IPC.confirm, id, accepted, version),
   agentCancel: (id: string): Promise<AgentRun> => ipcRenderer.invoke(AGENT_IPC.cancel, id),
   onAgentChanged: (cb: () => void): (() => void) => {
     const listener = (): void => cb()

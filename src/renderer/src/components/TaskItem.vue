@@ -50,6 +50,7 @@ async function setUrgency(n: number): Promise<void> {
 }
 
 const aiStatusLabel = computed(() => {
+  if (props.task.aiStatus === 'confirmed') return '草案已确认'
   if (props.task.aiStatus === 'failed') return 'AI 分析失败 · 规则排序'
   if (props.task.aiStatus === 'none') return '规则排序'
   return ''

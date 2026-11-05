@@ -31,7 +31,7 @@ export async function planningTests(test: Test): Promise<void> {
   }
   await test('v6旧日期保留但不冒认为截止，迁移可重复', () => {
     const old = new Database(':memory:')
-    old.exec("CREATE TABLE tasks(id INTEGER PRIMARY KEY,due_at TEXT,estimate_min INTEGER DEFAULT 30); INSERT INTO tasks(id,due_at) VALUES(1,'2030-01-07T23:59:00'); PRAGMA user_version=6")
+    old.exec("CREATE TABLE tasks(id INTEGER PRIMARY KEY,due_at TEXT,estimate_min INTEGER DEFAULT 30); CREATE TABLE agent_runs(id TEXT PRIMARY KEY); INSERT INTO tasks(id,due_at) VALUES(1,'2030-01-07T23:59:00'); PRAGMA user_version=6")
     runMigrations(old); runMigrations(old)
     const r = old.prepare('SELECT * FROM tasks').get() as { due_at: string; deadline_at: null; deadline_confirmed: number; deadline_source: string }
     assert.equal(r.due_at, '2030-01-07T23:59:00'); assert.equal(r.deadline_at, null); assert.equal(r.deadline_confirmed, 0); assert.equal(r.deadline_source, 'legacy_unconfirmed'); old.close()

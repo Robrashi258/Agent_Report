@@ -8,7 +8,7 @@ import { runMigrations } from '../src/main/db/migrations'
 import { getSettings, setSettings } from '../src/main/db/settingsDao'
 import * as tasks from '../src/main/db/taskDao'
 import * as store from '../src/main/agent/store'
-import { drive, confirmChange, sendMessage, cancelRun } from '../src/main/agent/runner'
+import { drive, confirmChange, sendMessage, cancelRun, startCapture, confirmTaskDraft, continueDraftPlan } from '../src/main/agent/runner'
 import { executeTool } from '../src/main/agent/tools'
 import { computeScore, isOverdue } from '../src/shared/priority'
 import { extractDueDate } from '../src/main/ai/rules'
@@ -20,6 +20,9 @@ import { profileTests } from './profile.test'
 import * as memory from '../src/main/memory/service'
 import * as feedback from '../src/main/feedback/service'
 import { processNext } from '../src/main/feedback/worker'
+import { draftTests } from './drafts.test'
+import * as drafts from '../src/main/drafts/service'
+import { registerReviewProvider, startReviewProposal } from '../src/main/drafts/reviewBridge'
 
 app.setPath('userData', mkdtempSync(join(tmpdir(), 'suishou-agent-tests-')))
 let passed = 0
@@ -42,7 +45,7 @@ app.whenReady().then(async () => {
   try {
     setSettings(configured)
     const taskId = seed('测试报告'), otherId = seed('另一份报告')
-    await test('迁移至v8且重复执行不破坏数据', () => { runMigrations(getDb()); assert.equal(getDb().pragma('user_version', { simple: true }), 8); assert.ok(tasks.getTaskById(taskId)) })
+    await test('迁移至v9且重复执行不破坏数据', () => { runMigrations(getDb()); assert.equal(getDb().pragma('user_version', { simple: true }), 9); assert.ok(tasks.getTaskById(taskId)) })
     await test('带截止的过期判定不抛异常', () => { assert.equal(isOverdue({ dueAt: '2026-01-01T12:00:00' }, new Date('2026-01-02').getTime()), true); assert.equal(isOverdue({ dueAt: null }), false); assert.ok(Number.isFinite(computeScore(tasks.getTaskById(taskId)!))) })
     await test('明天下午与分钟日期解析', () => { const now = new Date(2026, 10, 5, 10); assert.equal(extractDueDate('明天下午3:30交报告', now), '2026-11-06T15:30:00'); assert.equal(extractDueDate('明天27:00', now), null) })
     await test('自动重评不锁定、人工修改锁定', () => { tasks.updateTask({ id: taskId, importance: 4 }, 'review'); assert.equal(tasks.getTaskById(taskId)!.manualLocked, false); tasks.updateTask({ id: otherId, importance: 4 }); assert.equal(tasks.getTaskById(otherId)!.manualLocked, true) })
@@ -168,13 +171,14 @@ app.whenReady().then(async () => {
     })
     await planningTests(test)
     await profileTests(test)
+    await draftTests(test)
     if (process.argv.includes('--live')) {
       const keyFile = process.env.AGENT_TEST_KEY_FILE
       if (!keyFile) throw new Error('真实验证需要AGENT_TEST_KEY_FILE。')
       const key = readFileSync(keyFile, 'utf8').match(/sk-[A-Za-z0-9_.-]+/)?.[0]
       if (!key) throw new Error('未读到凭据。')
       setSettings({ aiBaseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', aiApiKey: key, aiModel: 'qwen-plus' })
-      if (!process.argv.includes('--profile-live')) {
+      if (!process.argv.includes('--profile-live')&&!process.argv.includes('--capture-live')) {
       await test('真实千问原生工具查询并回传结果', async () => {
         const run = create('请查询当前未完成任务，只列出任务名，不修改数据。')
         await drive(run)
@@ -233,6 +237,7 @@ app.whenReady().then(async () => {
         assert.equal(tasks.getTaskById(id)!.deadlineAt, deadline)
       })
       }
+      if(!process.argv.includes('--capture-live')) {
       await test('真实千问按需检索确认记忆并使用来源回答', async () => {
         memory.saveFact({ scope: '数学分析', key: '学习阶段', value: '数学分析目前初学，需要先理解例题' }, null)
         const run = create('我确认过的数学分析学习阶段是什么？请先检索个人记忆，不要猜。')
@@ -267,6 +272,33 @@ app.whenReady().then(async () => {
         assert.equal(messages.length,job.status==='asked'?1:0)
         console.log(`LIVE completion decision=${job.status}`)
       })
+      }
+      if(!process.argv.includes('--profile-live')) {
+      async function waitRun(id:string):Promise<ReturnType<typeof store.getRun>>{
+        for(let i=0;i<600&&store.getRun(id).status==='running';i++)await new Promise(r=>setTimeout(r,100))
+        return store.getRun(id)
+      }
+      await test('真实千问明确事项建草案，确认后唯一创建',async()=>{
+        const before=tasks.listTasks().length,r=startCapture('帮我记录“整理阶段四测试笔记”，预计30分钟，无硬截止，分组为阶段四测试。请直接形成草案给我核对。')
+        const state=await waitRun(r.id);assert.equal(state.status,'awaiting_confirmation',JSON.stringify(state.events));assert.ok(state.draftId)
+        const d=drafts.getDraft(state.draftId!);assert.equal(tasks.listTasks().length,before);assert.equal(d.items[0].estimateMin,30)
+        confirmTaskDraft(d.id,d.version,true);assert.equal(drafts.getDraft(d.id).createdTaskIds.length,1)
+      })
+      await test('真实千问模糊录入澄清、回答后创建并修改草案',async()=>{
+        const before=tasks.listTasks().length,r=startCapture('我想学完数学分析第三章，但还没确定是只阅读例题还是做全部习题。请先问清范围，暂不估时、不创建事项。')
+        let state=await waitRun(r.id);assert.equal(state.status,'waiting_user',JSON.stringify(state.events));assert.equal(tasks.listTasks().length,before)
+        sendMessage(r.id,'只阅读例题，预计60分钟，无硬截止，分组为数学分析。请生成待确认草案。')
+        state=await waitRun(r.id);assert.equal(state.status,'awaiting_confirmation',JSON.stringify(state.events));const d=drafts.getDraft(state.draftId!);assert.equal(d.items[0].estimateMin,60)
+        sendMessage(r.id,'请把当前草案的预计耗时改为45分钟，其他不变，仍先给我核对，不要创建正式任务。')
+        state=await waitRun(r.id);assert.equal(state.status,'awaiting_confirmation',JSON.stringify(state.events));assert.equal(drafts.getDraft(d.id).items[0].estimateMin,45);assert.equal(tasks.listTasks().length,before)
+      })
+      await test('模拟模块草案确认后转真实千问规划，截止保持独立',async()=>{
+        registerReviewProvider({id:'live_mock',simulated:true,getProposal:key=>({key,scene:'study_mock',title:'模拟复习对接',evidence:[{id:'fixture-live-v1',title:'固定测试证据',text:'模拟换行忘记变号'}],items:[{content:'真实接口验证-重做行列式原题',estimateMin:30,estimateGroup:'线性代数',deadlineMode:'none',category:'学习'}]})})
+        const id=startReviewProposal('live_mock','case-v1'),d=drafts.getDraft(store.getRun(id).draftId!);confirmTaskDraft(d.id,d.version,true)
+        const r=continueDraftPlan(d.id),state=await waitRun(r.id);assert.equal(state.status,'awaiting_confirmation',JSON.stringify(state.events));assert.ok(state.pending&&'type' in state.pending&&state.pending.type==='plan')
+        assert.equal(confirmChange(r.id,true).status,'completed');assert.equal(tasks.getTaskById(drafts.getDraft(d.id).createdTaskIds[0])!.deadlineAt,null)
+      })
+      }
       // 测试库退出后清空密钥，日志从不打印凭据。
       setSettings({ aiApiKey: '' })
     }

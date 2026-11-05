@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import { tasksActions } from '../stores/tasks'
+import type { AgentRun } from '@shared/agent'
 
-const emit = defineEmits<{ added: [content: string]; batchImported: [count: number, mode: 'ai' | 'rule', rebalanced: number] }>()
+const emit = defineEmits<{ added: [content: string]; opened: [run: AgentRun] }>()
 
 const text = ref('')
 const batchMode = ref(false)
 const busy = ref(false)
 const batchError = ref('')
+const mode=ref<'agent'|'quick'>('agent')
 
 const lineCount = computed(() => text.value.split(/\r?\n/).filter((l) => l.trim()).length)
 
@@ -25,10 +27,10 @@ async function submit(): Promise<void> {
     busy.value = true
     batchError.value = ''
     try {
-      const result = await window.api.taskBatchCreate(content)
+      const result = await window.api.batchPreview(content)
       text.value = ''
       batchMode.value = false
-      emit('batchImported', result.created, result.mode, result.rebalanced)
+      emit('opened', result)
     } catch (e) {
       batchError.value = e instanceof Error ? e.message : String(e)
     } finally {
@@ -38,14 +40,14 @@ async function submit(): Promise<void> {
   }
 
   // 单行 → 普通创建
-  text.value = ''
+  busy.value=true;batchError.value=''
   try {
-    await tasksActions.createTask(content)
-    emit('added', content)
+    if(mode.value==='agent')emit('opened',await window.api.captureStart(content))
+    else{await tasksActions.createTask(content);emit('added',content)}
+    text.value=''
   } catch (err) {
-    console.error('创建任务失败', err)
-    text.value = content // 失败还原文本
-  }
+    batchError.value=err instanceof Error?err.message:String(err)
+  } finally {busy.value=false}
 }
 
 function pasteHandler(e: ClipboardEvent): void {
@@ -62,7 +64,8 @@ function pasteHandler(e: ClipboardEvent): void {
     <textarea
       v-if="batchMode"
       v-model="text"
-      placeholder="粘贴整段计划（可含 10/22 周四 这类日期分组），AI 自动拆分任务并分配到每天…"
+      placeholder="粘贴多行计划，先预览、修改和确认，再创建任务；原文会保留…"
+      maxlength="12000"
       rows="6"
       @keydown.ctrl.enter="submit"
       @paste="pasteHandler"
@@ -71,24 +74,27 @@ function pasteHandler(e: ClipboardEvent): void {
       v-else
       v-model="text"
       type="text"
-      placeholder="遇到什么事，丢进来就好（回车保存）…"
+      :placeholder="mode==='agent'?'告诉助理要做什么（回车开始整理，确认前不创建）…':'快速记录（旧流程，回车直接保存）…'"
+      maxlength="2000"
       @keydown.enter="submit"
       @paste="pasteHandler"
     />
     <div class="right">
+      <select v-if="!batchMode" v-model="mode" aria-label="事项录入方式" :disabled="busy"><option value="agent">助理整理</option><option value="quick">快速记录</option></select>
       <button v-if="busy" class="hint-btn" disabled>AI 解析中…</button>
       <template v-else-if="batchMode">
         <span class="hint-btn static">{{ lineCount }} 行待解析</span>
         <button class="hint-btn" @click="toggleBatch">取消</button>
-        <button class="go" :disabled="!text.trim()" @click="submit">批量导入 Ctrl+Enter</button>
+        <button class="go" :disabled="!text.trim()" @click="submit">导入预览 Ctrl+Enter</button>
       </template>
-      <button v-else class="hint-btn" title="粘贴一段多行计划" @click="toggleBatch">批量计划</button>
+      <template v-else><button class="hint-btn" title="粘贴多行并预览" @click="toggleBatch">批量预览</button><button class="go" :disabled="!text.trim()" @click="submit">{{ mode==='agent'?'交给助理':'保存' }}</button></template>
     </div>
   </div>
   <div v-if="batchError" class="batch-error">{{ batchError }}</div>
 </template>
 
 <style scoped>
+.right select{border:1px solid var(--border);border-radius:7px;padding:5px;color:var(--text-2);background:var(--panel);font-size:12px}
 .quick-input {
   display: flex;
   align-items: center;

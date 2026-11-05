@@ -6,6 +6,9 @@ import type { Task } from '@shared/types'
 import type { ToolDefinition } from './model'
 import { createHash } from 'node:crypto'
 import * as memory from '../memory/service'
+import { registerTool } from './registry'
+import type { ToolContext, ToolResult } from './contracts'
+export type { ToolContext, ToolResult } from './contracts'
 
 type Field = { type: 'string' | 'integer' | 'array'; description?: string; enum?: string[]; minimum?: number; maximum?: number; maxLength?: number; items?: object; minItems?: number; maxItems?: number }
 interface Spec { name: string; description: string; fields: Record<string, Field>; required: string[] }
@@ -13,12 +16,12 @@ const specs: Spec[] = [
   { name: 'search_memory', description: '按当前目标检索相关的用户确认记忆。可按估时分组scope筛选（并包含相关全局记忆），最多5条；无命中如实为空。记忆有来源/版本/有效期，本次明确要求优先。', fields: {
     query: { type: 'string', maxLength: 100 }, scope: { type: 'string', maxLength: 60, description: '可选，使用实际分组原文如“数学分析”或“全局”，不要加course:等前缀；不知道真实分组时省略。' }, limit: { type: 'integer', minimum: 1, maximum: 5 }
   }, required: ['query'] },
-  { name: 'estimate_duration', description: '读取任务当前分组、原始估时和个人历史样本校准。不会改变已有计划或反复乘系数；试排会使用同一结果。', fields: { taskId: { type: 'integer', minimum: 1 } }, required: ['taskId'] },
+  { name: 'estimate_duration', description: '读取真实任务的分组、原始估时和个人历史样本校准。只知道名称时先list_tasks按关键词取得真实taskId，不猜测或使用示例ID。不会改变已有计划或反复乘系数；试排会使用同一结果。', fields: { taskId: { type: 'integer', minimum: 1 } }, required: ['taskId'] },
   { name: 'get_feedback_history', description: '读取指定估时分组最近最多5条有效完成反馈及用户补充，属于单次执行证据，不等同长期画像。撤销完成的记录不返回。', fields: { scope: { type: 'string', maxLength: 60 }, limit: { type: 'integer', minimum: 1, maximum: 5 } }, required: ['scope'] },
   { name: 'propose_memory', description: '提出长期记忆草案，用户确认后保存。分组scope可为全局或课程/估时分组；单次反馈不要直接泛化。更新现有记忆时预览原值。', fields: {
     scope: { type: 'string', maxLength: 60 }, key: { type: 'string', maxLength: 60 }, value: { type: 'string', maxLength: 800 }, expiresAt: { type: 'string', maxLength: 50, description: '可选ISO有效期，空字符串表示无到期时间。' }
   }, required: ['scope', 'key', 'value'] },
-  { name: 'respond', description: '结构化回复：模型自行选择mode=question等待用户回答，或mode=answer结束本轮。text为给用户的简短内容，不能声称未提交的操作已保存。', fields: {
+  { name: 'respond', description: '向用户展示本轮完整答复。text必须自包含，其他assistant content不会展示；查到事实后须在text中回答原问题，不能只问是否要继续规划。mode=question仅在确需补充信息时等待回答，事实已足够用mode=answer结束。不能声称未提交操作已保存。', fields: {
     mode: { type: 'string', enum: ['question', 'answer'] }, text: { type: 'string', maxLength: 3000 }
   }, required: ['mode', 'text'] },
   { name: 'get_calendar', description: '读取最多7天的课程、可安排时间窗口、每日上限和已有执行计划。日期格式YYYY-MM-DD。', fields: { startDate: { type: 'string', maxLength: 10 }, endDate: { type: 'string', maxLength: 10 } }, required: ['startDate', 'endDate'] },
@@ -29,8 +32,8 @@ const specs: Spec[] = [
   }, required: ['taskIds', 'startDate', 'endDate'] },
   { name: 'propose_plan', description: '将本次对话的试排结果交给用户确认。必须引用preview_plan返回的previewId；无可行块不能提交。存在未安排任务时说明部分成功，不得说全部安排。', fields: { previewId: { type: 'string', maxLength: 100 } }, required: ['previewId'] },
   { name: 'list_tasks', description: '查询任务。按关键词和状态筛选，返回真实字段及updatedAt；不会修改数据。',
-    fields: { query: { type: 'string', maxLength: 100 }, status: { type: 'string', enum: ['active', 'done', 'all'] }, limit: { type: 'integer', minimum: 1, maximum: 20 } }, required: [] },
-  { name: 'get_task', description: '按ID读取一条任务最新状态。提出调级前必须先读取；归档任务不可修改。',
+    fields: { query: { type: 'string', maxLength: 100 }, status: { type: 'string', enum: ['active', 'done', 'all'] }, limit: { type: 'integer', minimum: 1, maximum: 20 }, taskIds: { type: 'array', items: { type:'integer',minimum:1 },minItems:1,maxItems:20 } }, required: [] },
+  { name: 'get_task', description: '按已知真实ID读取一条任务最新状态。只知道名称时必须先list_tasks查询ID，不猜测或使用示例ID。提出调级前先读取；归档任务不可修改。',
     fields: { taskId: { type: 'integer', minimum: 1 } }, required: ['taskId'] },
   { name: 'propose_priority_change', description: '提出重要度/紧急度修改草案，必须使用刚读取的ID和updatedAt。不会立即写入；用户点击确认后应用。至少指定一种评分。',
     fields: { taskId: { type: 'integer', minimum: 1 }, importance: { type: 'integer', minimum: 1, maximum: 5 }, urgency: { type: 'integer', minimum: 1, maximum: 5 },
@@ -44,12 +47,10 @@ export const toolDefinitions: ToolDefinition[] = specs.map(s => ({ type: 'functi
   name: s.name, description: s.description,
   parameters: { type: 'object', properties: s.fields, required: s.required, additionalProperties: false }
 } }))
+for (const definition of toolDefinitions) registerTool({ definition,
+  effect: definition.function.name.startsWith('propose_') ? 'propose' : ['ask_user','respond','finish_reply'].includes(definition.function.name) ? 'respond' : 'read',
+  execute: (args, context) => executeTool(definition.function.name, JSON.stringify(args), context) })
 
-export interface ToolContext { observed: Map<number, string>; runId?: string }
-export interface ToolResult {
-  ok: boolean; data?: unknown; errorCode?: string; message?: string
-  pause?: 'waiting_user' | 'awaiting_confirmation' | 'completed'; pending?: PendingChange
-}
 function fail(errorCode: string, message: string): ToolResult { return { ok: false, errorCode, message } }
 function readableTimes(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(readableTimes)
@@ -65,7 +66,7 @@ function view(t: Task): object {
   return { id: t.id, content: t.content.slice(0, 400), summary: t.summary, status: t.status, importance: t.importance,
     urgency: t.urgency, deadlineAt: t.deadlineAt, deadlineLocal: t.deadlineAt ? new Date(t.deadlineAt).toLocaleString('sv-SE') : null,
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, deadlineConfirmed: t.deadlineConfirmed, deadlineSource: t.deadlineSource,
-    legacyDueAt: t.legacyDueAt, estimateMin: t.estimateMin, baseEstimateMin: t.baseEstimateMin,
+    legacyDueAt: t.legacyDueAt, executionWindowStart: t.rangeStart, executionWindowEnd: t.rangeEnd, estimateMin: t.estimateMin, baseEstimateMin: t.baseEstimateMin,
     estimateGroup: t.estimateGroup, estimateSource: t.estimateSource, personalEstimate: memory.durationEstimate(t), manualLocked: t.manualLocked, updatedAt: t.updatedAt }
 }
 export function executeTool(name: string, raw: string, context: ToolContext): ToolResult {
@@ -111,8 +112,9 @@ export function executeTool(name: string, raw: string, context: ToolContext): To
   } catch (e) { return fail('PLANNING_ERROR', e instanceof Error ? e.message : '规划工具执行失败。') }
   if (name === 'list_tasks') {
     const list = tasks.listTasks(args.status === 'all' ? {} : { status: args.status === 'done' ? 'done' : 'active' })
+      .filter(t => !args.taskIds || (args.taskIds as number[]).includes(t.id))
       .filter(t => !args.query || `${t.content} ${t.summary ?? ''}`.toLocaleLowerCase().includes(String(args.query).toLocaleLowerCase()))
-    const selected = list.slice(0, Number(args.limit ?? 10))
+    const selected = list.slice(0, Number(args.limit ?? (Array.isArray(args.taskIds) ? args.taskIds.length : 10)))
     selected.forEach(t => context.observed.set(t.id, t.updatedAt))
     return { ok: true, data: { tasks: selected.map(view), totalMatches: list.length, truncated: selected.length < list.length } }
   }

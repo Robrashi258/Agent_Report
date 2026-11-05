@@ -7,7 +7,7 @@ export type TaskStatus = 'inbox' | 'pending' | 'done' | 'archived'
 export type TaskCategory = '工作' | '生活' | '学习' | '其他'
 
 /** AI 分析状态：pending=分析中 / ok=AI 完成 / failed=AI 失败(规则兜底) / none=未配置 AI(规则排序) / rule=规则引擎结果 */
-export type AiStatus = 'pending' | 'ok' | 'failed' | 'none' | 'rule'
+export type AiStatus = 'pending' | 'ok' | 'failed' | 'none' | 'rule' | 'confirmed'
 
 /** 任务对象（渲染端视角，日期均为 ISO8601 字符串） */
 export interface Task {

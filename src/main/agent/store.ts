@@ -1,13 +1,13 @@
 import { randomUUID } from 'node:crypto'
 import { getDb } from '../db/database'
-import type { AgentRun, AgentEvent, PendingChange, RunStatus } from '@shared/agent'
+import type { AgentRun, AgentEvent, PendingChange, RunStatus, RunSummary } from '@shared/agent'
 import type { ModelMessage } from './model'
 
-interface RunRow { id: string; goal: string; status: RunStatus; messages_json: string; pending_json: string | null; turns: number; updated_at: string }
-export function createRun(goal: string, messages: ModelMessage[]): string {
+interface RunRow { id: string; goal: string; status: RunStatus; messages_json: string; pending_json: string | null; turns: number; updated_at: string; scene: string }
+export function createRun(goal: string, messages: ModelMessage[], scene = 'planning'): string {
   const id = randomUUID(), now = new Date().toISOString()
-  getDb().prepare('INSERT INTO agent_runs(id,goal,status,messages_json,created_at,updated_at) VALUES(?,?,?,?,?,?)')
-    .run(id, goal, 'running', JSON.stringify(messages), now, now)
+  getDb().prepare('INSERT INTO agent_runs(id,goal,status,messages_json,created_at,updated_at,scene) VALUES(?,?,?,?,?,?,?)')
+    .run(id, goal, 'running', JSON.stringify(messages), now, now, scene)
   addEvent(id, 'user', goal)
   return id
 }
@@ -18,8 +18,14 @@ export function row(id: string): RunRow {
 }
 export function getRun(id: string): AgentRun {
   const r = row(id)
+  const draft = getDb().prepare('SELECT id,state,created_ids_json FROM task_drafts WHERE run_id=?').get(id) as { id: string; state: AgentRun['draftState']; created_ids_json: string } | undefined
   const events = getDb().prepare('SELECT id,kind,text,created_at AS createdAt FROM agent_events WHERE run_id=? ORDER BY id').all(id) as AgentEvent[]
-  return { id, goal: r.goal, status: r.status, updatedAt: r.updated_at, events, pending: r.pending_json ? JSON.parse(r.pending_json) : null }
+  return { id, goal: r.goal, status: r.status, scene: r.scene, draftId: draft?.id ?? null, draftState: draft?.state ?? null,
+    createdTaskIds: draft ? JSON.parse(draft.created_ids_json) : [], updatedAt: r.updated_at, events, pending: r.pending_json ? JSON.parse(r.pending_json) : null }
+}
+export function runHistory(): RunSummary[] {
+  return getDb().prepare(`SELECT r.id,r.goal,r.status,r.scene,r.updated_at AS updatedAt,d.state AS draftState FROM agent_runs r
+    LEFT JOIN task_drafts d ON d.run_id=r.id ORDER BY r.updated_at DESC,r.rowid DESC LIMIT 30`).all() as RunSummary[]
 }
 export function latestRun(): AgentRun | null {
   const r = getDb().prepare('SELECT id FROM agent_runs ORDER BY updated_at DESC, rowid DESC LIMIT 1').get() as { id: string } | undefined

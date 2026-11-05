@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3'
-export const LATEST_SCHEMA_VERSION = 8
+export const LATEST_SCHEMA_VERSION = 9
 
 /** 简单版本迁移：user_version 存版本号，逐版本执行 DDL */
 export function runMigrations(db: Database.Database): void {
@@ -163,6 +163,36 @@ export function runMigrations(db: Database.Database): void {
         CREATE INDEX idx_followup_state ON followup_messages(state,is_read);
       `)
       db.pragma('user_version = 8')
+    })()
+  }
+  if (version < 9) {
+    db.transaction(() => {
+      db.exec(`
+        ALTER TABLE agent_runs ADD COLUMN scene TEXT NOT NULL DEFAULT 'planning';
+        CREATE TABLE task_sources (
+          run_id TEXT PRIMARY KEY REFERENCES agent_runs(id), kind TEXT NOT NULL,
+          raw_text TEXT NOT NULL, evidence_ref TEXT NOT NULL
+        );
+        CREATE TABLE task_drafts (
+          id TEXT PRIMARY KEY, run_id TEXT NOT NULL UNIQUE REFERENCES agent_runs(id),
+          version INTEGER NOT NULL DEFAULT 1, state TEXT NOT NULL DEFAULT 'editing', items_json TEXT NOT NULL,
+          created_ids_json TEXT NOT NULL DEFAULT '[]', handoff_run_id TEXT, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE task_draft_links (
+          task_id INTEGER NOT NULL UNIQUE REFERENCES tasks(id), draft_id TEXT NOT NULL REFERENCES task_drafts(id),
+          item_id TEXT NOT NULL, source_ref TEXT NOT NULL, UNIQUE(draft_id,item_id)
+        );
+        CREATE TABLE task_draft_revisions (
+          draft_id TEXT NOT NULL REFERENCES task_drafts(id), version INTEGER NOT NULL,
+          items_json TEXT NOT NULL, actor TEXT NOT NULL, created_at TEXT NOT NULL,
+          PRIMARY KEY(draft_id,version)
+        );
+        CREATE TABLE review_proposals (
+          provider TEXT NOT NULL, proposal_key TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES agent_runs(id),
+          PRIMARY KEY(provider,proposal_key)
+        );
+      `)
+      db.pragma('user_version = 9')
     })()
   }
 }

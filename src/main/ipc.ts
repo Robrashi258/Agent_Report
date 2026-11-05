@@ -5,7 +5,6 @@ import type { ChainGroup } from '@shared/types'
 import { getSettings, setSettings } from './db/settingsDao'
 import { enqueueAnalyze, retryAnalyze, setBroadcastFn } from './ai/analyzer'
 import { testConnection, isAiConfigured } from './ai/client'
-import { aiBatchParse, ruleBatchParse } from './ai/batch'
 import type { RebalanceResult } from '@shared/types'
 import { AGENT_IPC } from '@shared/agent'
 import * as agent from './agent/runner'
@@ -16,6 +15,8 @@ import { PROFILE_IPC, type MemoryInput, type FeedbackInput } from '@shared/profi
 import * as memory from './memory/service'
 import * as feedback from './feedback/service'
 import { configureWorker, wakeWorker } from './feedback/worker'
+import { DRAFT_IPC, type DraftItem } from '@shared/drafts'
+import * as drafts from './drafts/service'
 
 /** 广播任务变化（分析完成/手机端操作后刷新所有视图） */
 export function broadcastTaskChanged(win: BrowserWindow | null): void {
@@ -26,6 +27,18 @@ export function broadcastTaskChanged(win: BrowserWindow | null): void {
 
 export function registerIpcHandlers(getWin: () => BrowserWindow | null): void {
   const changed = (): void => broadcastTaskChanged(getWin())
+  const agentChanged = (): void => { changed(); const win=getWin(); if(win&&!win.isDestroyed())win.webContents.send(AGENT_IPC.changed) }
+  ipcMain.handle(DRAFT_IPC.capture, (_e, goal: unknown) => agent.startCapture(goal))
+  ipcMain.handle(DRAFT_IPC.batch, (_e, raw: unknown) => agent.startBatch(raw))
+  ipcMain.handle(DRAFT_IPC.get, (_e, id: string) => drafts.getDraft(id))
+  ipcMain.handle(DRAFT_IPC.save, (_e, id: string, version: number, items: DraftItem[]) => { const d=drafts.saveFromUI(id,version,items);agentChanged();return d })
+  ipcMain.handle(DRAFT_IPC.add, (_e, id: string, version: number, content: string) => {
+    const d=drafts.getDraft(id);if(d.version!==version||agentStore.row(d.runId).status==='running')throw new Error('草案版本已变化或模型正在运行。')
+    const next=drafts.addItem(d.runId,{content,estimateMin:30,deadlineMode:'unknown',note:'手动补充候选，耗时请核对。'},'user');agentChanged();return next
+  })
+  ipcMain.handle(DRAFT_IPC.continuePlan, (_e, id: string) => agent.continueDraftPlan(id))
+  ipcMain.handle(DRAFT_IPC.mockReview, () => agent.startMockReview())
+  ipcMain.handle(DRAFT_IPC.confirm, (_e,id:string,version:number,accepted:boolean)=>agent.confirmTaskDraft(id,version,accepted))
   const profileChanged = (): void => { const win = getWin(); if (win && !win.isDestroyed()) win.webContents.send(PROFILE_IPC.changed) }
   configureWorker(profileChanged, agent.isAgentBusy)
   ipcMain.handle(PROFILE_IPC.memoryList, () => memory.listFacts())
@@ -63,7 +76,8 @@ export function registerIpcHandlers(getWin: () => BrowserWindow | null): void {
     if (typeof id !== 'string' || id.length > 100) throw new Error('对话编号无效。')
     return agentStore.getRun(id)
   })
-  ipcMain.handle(AGENT_IPC.confirm, (_e, id: unknown, accepted: unknown) => agent.confirmChange(id, accepted))
+  ipcMain.handle(AGENT_IPC.confirm, (_e, id: unknown, accepted: unknown, version?:number) => agent.confirmChange(id, accepted, version))
+  ipcMain.handle(AGENT_IPC.history, () => agentStore.runHistory())
   ipcMain.handle(AGENT_IPC.cancel, (_e, id: unknown) => agent.cancelRun(id))
 
   ipcMain.handle(IPC.taskCreate, (_e, input: TaskCreateInput): Task => {
@@ -108,32 +122,7 @@ export function registerIpcHandlers(getWin: () => BrowserWindow | null): void {
     return true
   })
 
-  ipcMain.handle(IPC.taskBatchCreate, async (_e, text: string): Promise<BatchCreateResult> => {
-    const settings = getSettings()
-    let items
-    let mode: 'ai' | 'rule'
-    if (isAiConfigured(settings)) {
-      try {
-        items = await aiBatchParse(settings, text)
-        mode = 'ai'
-      } catch (e) {
-        console.warn('[batch] AI 批量解析失败，走规则拆分', e)
-        items = ruleBatchParse(text)
-        mode = 'rule'
-      }
-    } else {
-      items = ruleBatchParse(text)
-      mode = 'rule'
-    }
-    if (items.length === 0) {
-      throw new Error('没有解析出任何任务，请检查粘贴的内容')
-    }
-    const created = taskDao.batchCreateTasks(items, mode === 'ai' ? 'ok' : 'none')
-    // 导入只建立任务，执行安排由新版试排及用户确认保存。
-    const assigned = 0
-    broadcastTaskChanged(getWin())
-    return { created, mode, rebalanced: assigned }
-  })
+  ipcMain.handle(IPC.taskBatchCreate, (): BatchCreateResult => { throw new Error('直接批量创建已停用，请使用batchPreview预览并确认。') })
 
   ipcMain.handle(IPC.scheduleRebalance, (): RebalanceResult => { throw new Error('旧按天分配已停用，请在今日助理或日程中试排。') })
 

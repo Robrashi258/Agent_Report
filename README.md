@@ -1,0 +1,61 @@
+# 随手计划 · Agent_Report
+
+大模型智能体基础与应用课程协作仓库。当前上传的是**0.1源码基线与开发方案**，不是已经完成的新Agent版本。
+
+## 先看这些
+
+- [最新改进方案 v0.5](docs/改进方案.md)：架构、工具、记忆/RAG、调度、OCR、交互与验收。
+- [协作交接](docs/协作交接.md)：三人边界、开发顺序、作业助手接入方式。
+- [基线状态与已知问题](docs/基线状态.md)：已有功能、构建记录、未修复问题。
+- [原始改进建议](docs/原始改进建议.txt)：用户最初的需求记录。
+
+## 当前与目标
+
+当前0.1是固定工作流：输入文字→模型/规则提取任务参数→程序排序和按天分配。技术栈为Electron、Vue 3、TypeScript、better-sqlite3。SQLite数据库在应用的userData目录，不在仓库。
+
+拟新增：模型自主选择查询/澄清/试排，Harness执行内部工具并回传结果；相关记忆检索、课表时段调度、后台消息与今日对话，以及作业问答、OCR校对、知识卡和复习联动。
+
+**首版不用MCP**。内部工具函数→业务服务/DAO→SQLite；模型不能直接执行任意SQL。新增模块目前仅为文档规划，详见方案，勿将目录建议误认为现成接口。
+
+## Windows开发启动
+
+准备Node.js 22 LTS（含npm）、Git。本次验证使用22.16.0；现有SQLite依赖在本机Node 24下安装失败，交接阶段请先使用22系列。首次安装需要联网下载依赖、Electron以及必要的原生模块资源；以下命令在本仓库根目录执行：
+
+```powershell
+npm ci
+Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
+npm run dev
+```
+
+若Electron下载连接超时，可以在当前PowerShell窗口临时指定下载镜像，再重试安装（本次验证使用此方式）：
+
+```powershell
+$env:ELECTRON_MIRROR = 'https://npmmirror.com/mirrors/electron/'
+npm ci
+```
+
+构建后启动：
+
+```powershell
+npm run build
+.\start-plan.bat
+```
+
+`start-plan.bat`依赖本机已安装node_modules和已生成out，不是免安装发行版。本仓库不携带运行时依赖或安装包。
+
+如果原生SQLite模块ABI不匹配，可在已安装依赖后运行`npm exec electron-builder install-app-deps`，再构建。仍失败时检查实际Node/Electron版本和原始错误，不从他人电脑复制node_modules。
+
+模型在应用“设置”中填写兼容接口地址、模型名和个人密钥；仓库不提供密钥。未配置时使用规则回退。不要提交个人数据库、截图中的账号信息或接口凭据。
+
+交接检查已通过依赖安装、三端构建和Electron内存SQLite读写；未宣称完整界面回归通过。今日页存在已知错误，详见基线状态，优先修复。
+
+## 协作分工
+
+| 人员 | 工作边界 |
+|---|---|
+| 孔传（kc） | 0.1基础说明、基线复现与交接；是否参与新增修复按真实记录 |
+| 王浩宇 | 先建设规划Agent、共享Harness、记忆、课表/调度与今日交互 |
+| 罗德金（ldj） | 基础接口稳定后接入作业帮助、OCR、知识卡、原题复习和复习任务草案 |
+
+共享接口先形成契约再开发。新功能在feature分支完成，通过PR合并；不要直接复制覆盖同伴的共享文件。仓库不包含原答辩PPT、报告、个人数据、模型实测原始日志或移动云比赛应用。
+

@@ -1,0 +1,28 @@
+{
+  "name": "suishou-plan",
+  "version": "0.1.0",
+  "description": "随手计划 - AI 自动安排轻重缓急的个人计划工具",
+  "main": "./out/main/index.js",
+  "author": "personal",
+  "private": true,
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "postinstall": "electron-builder install-app-deps",
+    "dist": "electron-vite build && electron-builder --win nsis"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.5.0",
+    "qrcode": "^1.5.4",
+    "vue": "^3.5.44"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.1.4",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^2.3.0",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10"
+  }
+}

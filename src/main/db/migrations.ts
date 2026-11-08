@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3'
-export const LATEST_SCHEMA_VERSION = 9
+export const LATEST_SCHEMA_VERSION = 12
 
 /** 简单版本迁移：user_version 存版本号，逐版本执行 DDL */
 export function runMigrations(db: Database.Database): void {
@@ -194,5 +194,109 @@ export function runMigrations(db: Database.Database): void {
       `)
       db.pragma('user_version = 9')
     })()
+  }
+  if (version < 10) {
+    // v10: 学习资料解析与考点分析（文件只记路径引用，不复制、不存全文）
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE study_documents (
+          id TEXT PRIMARY KEY, path TEXT NOT NULL, name TEXT NOT NULL,
+          ext TEXT NOT NULL CHECK(ext IN ('pdf','docx','txt','md')),
+          size_bytes INTEGER NOT NULL, content_hash TEXT NOT NULL,
+          page_count INTEGER NOT NULL DEFAULT 0, char_count INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL DEFAULT 'registered' CHECK(status IN ('registered','parsed','failed')),
+          parser TEXT NOT NULL DEFAULT '', outline_confidence REAL NOT NULL DEFAULT 0,
+          last_error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+          UNIQUE(path, content_hash)
+        );
+        CREATE TABLE study_chapters (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          doc_id TEXT NOT NULL REFERENCES study_documents(id) ON DELETE CASCADE,
+          ordinal INTEGER NOT NULL, level INTEGER NOT NULL DEFAULT 1 CHECK(level BETWEEN 1 AND 4),
+          title TEXT NOT NULL, start_page INTEGER NOT NULL, end_page INTEGER NOT NULL,
+          confidence REAL NOT NULL DEFAULT 0 CHECK(confidence BETWEEN 0 AND 1),
+          selected INTEGER NOT NULL DEFAULT 1,
+          UNIQUE(doc_id, ordinal), CHECK(start_page >= 1 AND start_page <= end_page)
+        );
+        CREATE TABLE study_goals (
+          doc_id TEXT PRIMARY KEY REFERENCES study_documents(id) ON DELETE CASCADE,
+          exam_date TEXT, self_level TEXT CHECK(self_level IN ('weak','normal','strong')),
+          target TEXT CHECK(target IN ('pass','good','excellent')),
+          daily_min INTEGER CHECK(daily_min BETWEEN 15 AND 720),
+          weekdays_json TEXT NOT NULL DEFAULT '[]',
+          daypart TEXT CHECK(daypart IN ('morning','afternoon','evening','any')),
+          assumptions_json TEXT NOT NULL DEFAULT '[]',
+          confirmed INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE study_topics (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          doc_id TEXT NOT NULL REFERENCES study_documents(id) ON DELETE CASCADE,
+          chapter_id INTEGER NOT NULL REFERENCES study_chapters(id) ON DELETE CASCADE,
+          ordinal INTEGER NOT NULL, name TEXT NOT NULL,
+          importance INTEGER NOT NULL CHECK(importance BETWEEN 1 AND 5),
+          difficulty INTEGER NOT NULL CHECK(difficulty BETWEEN 1 AND 5),
+          exam_likelihood INTEGER NOT NULL CHECK(exam_likelihood BETWEEN 1 AND 5),
+          estimate_min INTEGER NOT NULL CHECK(estimate_min BETWEEN 10 AND 480),
+          evidence_page INTEGER, evidence_quote TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL, UNIQUE(chapter_id, ordinal)
+        );
+        CREATE TABLE study_analyses (
+          id TEXT PRIMARY KEY,
+          doc_id TEXT NOT NULL REFERENCES study_documents(id) ON DELETE CASCADE,
+          chapter_ids_json TEXT NOT NULL, prompt_version TEXT NOT NULL, model TEXT NOT NULL,
+          max_calls INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'running'
+            CHECK(status IN ('running','done','partial','failed','cancelled')),
+          error TEXT, created_at TEXT NOT NULL, finished_at TEXT
+        );
+        CREATE TABLE study_analysis_calls (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          analysis_id TEXT NOT NULL REFERENCES study_analyses(id) ON DELETE CASCADE,
+          chapter_id INTEGER NOT NULL, attempt INTEGER NOT NULL DEFAULT 1,
+          status TEXT NOT NULL CHECK(status IN ('ok','invalid','error')),
+          request_chars INTEGER NOT NULL DEFAULT 0, response_chars INTEGER NOT NULL DEFAULT 0,
+          latency_ms INTEGER NOT NULL DEFAULT 0, error TEXT, created_at TEXT NOT NULL,
+          UNIQUE(analysis_id, chapter_id, attempt)
+        );
+        CREATE INDEX idx_study_topics_doc ON study_topics(doc_id, chapter_id, ordinal);
+        CREATE INDEX idx_study_calls_analysis ON study_analysis_calls(analysis_id);
+      `)
+      db.pragma('user_version = 10')
+    })()
+  }
+  if (version < 11) {
+    // v11: 扫描件识别（逐页渲染 + 视觉模型转录），识别结果落库以便复用，避免重复付费
+    db.transaction(() => {
+      db.exec(`
+        ALTER TABLE study_documents ADD COLUMN ocr_state TEXT NOT NULL DEFAULT 'none';
+        CREATE TABLE study_pages (
+          doc_id TEXT NOT NULL REFERENCES study_documents(id) ON DELETE CASCADE,
+          page_no INTEGER NOT NULL CHECK(page_no >= 1),
+          text TEXT NOT NULL DEFAULT '',
+          source TEXT NOT NULL CHECK(source IN ('text','ocr')),
+          engine TEXT NOT NULL DEFAULT '',
+          ink_ratio REAL NOT NULL DEFAULT 0,
+          latency_ms INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY(doc_id, page_no)
+        );
+        CREATE TABLE study_ocr_runs (
+          id TEXT PRIMARY KEY,
+          doc_id TEXT NOT NULL REFERENCES study_documents(id) ON DELETE CASCADE,
+          from_page INTEGER NOT NULL, to_page INTEGER NOT NULL,
+          status TEXT NOT NULL DEFAULT 'running' CHECK(status IN ('running','done','partial','failed','cancelled')),
+          model TEXT NOT NULL DEFAULT '', prompt_version TEXT NOT NULL DEFAULT '',
+          total_pages INTEGER NOT NULL DEFAULT 0, done_pages INTEGER NOT NULL DEFAULT 0,
+          error TEXT, created_at TEXT NOT NULL, finished_at TEXT
+        );
+        CREATE INDEX idx_study_pages_doc ON study_pages(doc_id, page_no);
+        CREATE INDEX idx_study_ocr_runs_doc ON study_ocr_runs(doc_id, created_at);
+      `)
+        db.pragma('user_version = 11')
+    })()
+  }
+  if (version < 12) {
+    // v12: 助理提问的候选答复（只在 waiting_user 期间有效，发消息或结束即清空）
+    db.exec(`ALTER TABLE agent_runs ADD COLUMN question_json TEXT`)
+    db.pragma('user_version = 12')
   }
 }

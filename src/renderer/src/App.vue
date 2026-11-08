@@ -3,6 +3,7 @@ import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import QuickInput from './components/QuickInput.vue'
 import TaskItem from './components/TaskItem.vue'
 import TodayView from './views/TodayView.vue'
+import AssistantView from './views/AssistantView.vue'
 import InboxView from './views/InboxView.vue'
 import ScheduleView from './views/ScheduleView.vue'
 import ProjectsView from './views/ProjectsView.vue'
@@ -14,11 +15,11 @@ import { feedbackState, startFeedbackListener } from './stores/feedback'
 import { openAgentRun, agentNavigation } from './stores/agentNavigation'
 import type {AgentRun} from '@shared/agent'
 
-type ViewName = 'today' | 'inbox' | 'schedule' | 'projects' | 'all' | 'stats' | 'settings' | 'memory'
+type ViewName = 'today' | 'assistant' | 'inbox' | 'schedule' | 'projects' | 'all' | 'stats' | 'settings' | 'memory'
 
 const current = ref<ViewName>('today')
 let lastOpenedRun:string|null=null
-watch(()=>agentNavigation.revision,async()=>{current.value='today';if(lastOpenedRun!==agentNavigation.runId){lastOpenedRun=agentNavigation.runId;await nextTick();if(contentPane.value)contentPane.value.scrollTop=0}})
+watch(()=>agentNavigation.revision,async()=>{current.value='assistant';if(lastOpenedRun!==agentNavigation.runId){lastOpenedRun=agentNavigation.runId;await nextTick();if(contentPane.value)contentPane.value.scrollTop=0}})
 const contentPane = ref<HTMLElement | null>(null)
 let offFeedback: (() => void) | undefined
 onMounted(() => { offFeedback=startFeedbackListener() }); onUnmounted(() => offFeedback?.())
@@ -26,6 +27,7 @@ watch(current, async () => { await nextTick(); if (contentPane.value) contentPan
 
 const navs = [
   { key: 'today' as ViewName, label: '今日', icon: '☀️' },
+  { key: 'assistant' as ViewName, label: '助理', icon: '💬' },
   { key: 'inbox' as ViewName, label: '待确认', icon: '📥' },
   { key: 'schedule' as ViewName, label: '日程', icon: '🗓️' },
   { key: 'projects' as ViewName, label: '项目', icon: '🔗' },
@@ -37,6 +39,7 @@ const navs = [
 
 const viewComponents = {
   today: TodayView,
+  assistant: AssistantView,
   inbox: InboxView,
   schedule: ScheduleView,
   projects: ProjectsView,
@@ -64,7 +67,7 @@ function handleQuickAdd(content: string): void {
   if (!inboxRouted) current.value = 'today'
   showToast('已快速记录')
 }
-function handleOpened(run:AgentRun):void{openAgentRun(run.id);current.value='today';showToast('已打开事项整理，确认前不会创建任务')}
+function handleOpened(run:AgentRun):void{openAgentRun(run.id);current.value='assistant';showToast('已打开事项整理，确认前不会创建任务')}
 
 provideToast()
 function provideToast(): void {

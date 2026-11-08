@@ -3,7 +3,6 @@ import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { tasksStore } from '../stores/tasks'
 import { computeScore, isOverdue } from '@shared/priority'
 import TaskItem from '../components/TaskItem.vue'
-import AgentChat from '../components/AgentChat.vue'
 import TodayPlan from '../components/TodayPlan.vue'
 import FollowupInbox from '../components/FollowupInbox.vue'
 
@@ -48,8 +47,12 @@ const todayLabel = new Date().toLocaleDateString('zh-CN', { month: 'long', day: 
     </header>
 
     <TodayPlan />
-    <FollowupInbox />
-    <AgentChat />
+
+    <div v-if="!sortedPending.length && !doneToday.length" class="empty">
+      <div class="icon">🌱</div>
+      <p>今天还没有安排</p>
+      <p class="hint">把遇到的事丢到上面的输入框里吧，也可以到「助理」里说说今天想怎么安排</p>
+    </div>
 
     <div v-if="overdue.length" class="overdue-zone">
       <div class="zone-title">⚠️ 已过期（{{ overdue.length }}）</div>
@@ -74,20 +77,18 @@ const todayLabel = new Date().toLocaleDateString('zh-CN', { month: 'long', day: 
       </details>
     </div>
 
-    <div v-if="doneToday.length" class="done-zone">
-      <details>
-        <summary>今日已完成 {{ doneToday.length }} 件</summary>
-        <div class="zone-list">
-          <TaskItem v-for="t in doneToday" :key="t.id" :task="t" />
-        </div>
-      </details>
-    </div>
+    <section class="review-block">
+      <FollowupInbox />
 
-    <div v-if="!sortedPending.length && !doneToday.length" class="empty">
-      <div class="icon">🌱</div>
-      <p>今天还没有安排</p>
-      <p class="hint">把遇到的事丢到上面的输入框里吧</p>
-    </div>
+      <div v-if="doneToday.length" class="done-zone">
+        <details>
+          <summary>今日已完成 {{ doneToday.length }} 件</summary>
+          <div class="zone-list">
+            <TaskItem v-for="t in doneToday" :key="t.id" :task="t" />
+          </div>
+        </details>
+      </div>
+    </section>
   </div>
 </template>
 
@@ -138,6 +139,14 @@ const todayLabel = new Date().toLocaleDateString('zh-CN', { month: 'long', day: 
 .done-zone {
   margin-top: 18px;
   color: var(--text-3);
+}
+.review-block {
+  margin-top: 24px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+.review-block .done-zone {
+  margin-top: 0;
 }
 .later-zone summary,
 .done-zone summary {
